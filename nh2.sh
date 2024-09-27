@@ -10,7 +10,7 @@ if [ "$1" == "help" ] ; then
 	exit 0
 fi
 
-cd
+cd ~/nh
 mkdir $1
 cd $1
 
@@ -29,7 +29,7 @@ do
 	img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p][p|n]g" tmp$i.html)
 	# echo $img
 #curl to download it
-	curl -O -s $img &
+	curl -O -s --retry 5 $img &
 	rm tmp$i.html
 done
 
