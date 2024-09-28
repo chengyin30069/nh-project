@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# help info
 if [ "$1" == "help" ] ; then
 	echo This is a script used to download and nhentai as pictures
 	echo
@@ -10,97 +11,73 @@ if [ "$1" == "help" ] ; then
 	exit 0
 fi
 
+# directory for saving the image
 cd ~/nh
 mkdir $1
 cd $1
 
-declare max_page=0
+# fetch the cover page and save it
+declare COVER_HTML="$(curl -sS https://nhentai.net/g/485643/)"
+echo "$COVER_HTML" > cover_page.html
 
-touch tmp.html
+# a command to download with auto-retrying
+download-with-auto-retry() {
+	declare FILENAME=$1
+	declare URL=$2
+	touch $FILENAME
 
-for i in $(seq 1 500)
-do
-#skip if image already exists, should be alright
-	if [ -e $i.jpg ]; then
-		continue
-	fi
-	if [ -e $i.png ]; then
-		continue
-	fi
-	if [ -e $i.gif ]; then
-		continue
-	fi
-
-#download html of nhentai.net/g/NUMBER/$i
-	curl -s https://nhentai.net/g/$1/$i/ > tmp.html
-
-#check if it's 404 or not, break if it is
-	# echo $(grep -o -e "404 - Not Found" tmp.html)
-	if [ "$(grep -o -e "404 - Not Found" tmp.html)" == "404 - Not Found" ]; then
-		max_page=$(($i-1))
-		break
-	fi
-	# echo $i
-
-
-#grep to get the source of image
-	img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p|g][p|n|i][g|f]" tmp.html)
-	# echo $img
-
-#wget to download it
-	file_type=${img#*.}
-	file_type=${file_type#*.}
-	file_type=${file_type#*.}
-	if [ ! -f $i.$file_type ]; then
-		wget -q $img &
-	fi
-	echo "$1: $i"
-done
-
-#echo $max_page
-
-# recheck
-for k in $(seq 1 50)
-do
-	flag=0
-	sleep 1
-	for j in $(seq 1 10)
-	do
-		flag=0
-		for i in $(seq 1 $max_page)
-		do
-			#skip if file already exists, ought to be right
-			if [ -e $i.jpg ]; then
-				continue
-			fi
-			if [ -e $i.png ]; then
-				continue
-			fi
-			if [ -e $i.gif ]; then
-				continue
-			fi
-
-			#flaged since there's still image loss
-			flag=1
-
-			#resend html request
-			curl -s https://nhentai.net/g/$1/$i/ > tmp.html
-			img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p|g][p|n|i][g|f]" tmp.html)
-
-			#get img type
-			wget -q $img &
-			# echo "$i "
-		done
-
-		if [ $flag -eq 0 ]; then
-			break
+	curl -sS -o "$FILENAME" "$URL"
+	declare LAST_CURL_DOWNLOAD_RET=$?
+	declare MAX_RETRY=3
+	for i in $(seq 1 "$MAX_RETRY"); do 
+		# retry if curl didn't run successfully
+		if [ "$LAST_CURL_DOWNLOAD_RET" -eq 0 ]; then
+			break;
 		fi
+		echo "$FILENAME some errors met while downloading. Retrying ($i/$MAX_RETRY)..."
+		curl -sS -o "$FILENAME" "$URL"
 	done
-	if [ $flag -eq 0 ]; then
-		break
-	fi
-done
 
-rm tmp.html
-# rm tmp*.html
-# ls | grep -P "[0|1|2|3|4|5|6|7|8|9]$" | xargs -d"\n" rm
+	# tell the user that some file is downloaded
+	if [ "$LAST_CURL_DOWNLOAD_RET" -eq 0 ]; then
+		echo "$FILENAME downloaded"
+	else
+		echo "$FILENAME failed to download"
+	fi
+}
+
+# extract a list of images that we need to download
+# make enter after each html tag 
+# -> grep the urls 
+#	 - pattern: cover.jpg/png/gif, and t${number}.jpg/png/gif for thumbnails
+# -> convert thumbnail filenames to normal files
+# -> uniquify the links with awk
+#    - notice: there may still be multiple urls for book covers
+declare IMAGE_URLS="$(echo "$COVER_HTML" \
+	| sed -E 's/>/\n/g' \
+	| grep -oEe 'https://t[0-9]+.nhentai\.net/galleries/[0-9]+/([0-9]+t|cover)\.[a-zA-Z]+' \
+	| sed -E 's/t(\.[a-zA-Z]{1,10})$/\1/g' \
+	| awk '!a[$0]++'
+)"
+
+# download each image
+declare JOBS=""
+for URL in $IMAGE_URLS; do 
+	# extract filename 
+	declare FILENAME="$(echo "$URL" | sed -E 's/.*\/([^\/]+)/\1/' )"
+
+	# check if file exists; if do, skip it
+	if [ -e "$FILENAME" ]; then
+		continue
+	fi
+
+	# download the file with auto-retrying
+	download-with-auto-retry $FILENAME $URL &
+	JOBS="$JOBS $!"
+done;
+
+# do not exit the program before all the jobs done
+for PID in $JOBS; do 
+	wait "$PID";
+done;
+
