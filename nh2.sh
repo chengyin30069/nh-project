@@ -18,8 +18,17 @@ declare max_page=0
 
 for i in $(seq 1 500)
 do
+#skip if image already exists, should be alright
+	if [ -e $i.jpg ]; then
+		continue
+	fi
+	if [ -e $i.png ]; then
+		continue
+	fi
+
 #download html of nhentai.net/g/NUMBER/$i
 	curl -s https://nhentai.net/g/$1/$i/ > tmp$i.html
+
 #check if it's 404 or not, break if it is
 	# echo $(grep -o -e "404 - Not Found" tmp.html)
 	if [ "$(grep -o -e "404 - Not Found" tmp$i.html)" == "404 - Not Found" ]; then
@@ -28,9 +37,12 @@ do
 		break
 	fi
 	# echo $i
+
+
 #grep to get the source of image
 	img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p][p|n]g" tmp$i.html)
 	# echo $img
+
 #wget to download it
 	file_type=${img#*.}
 	file_type=${file_type#*.}
@@ -39,7 +51,7 @@ do
 		wget -q $img &
 	fi
 	echo "$1: $i"
-	#rm tmp$i.html
+	rm tmp$i.html
 done
 
 #echo $max_page
@@ -54,27 +66,35 @@ do
 		flag=0
 		for i in $(seq 1 $max_page)
 		do
-
-			img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p][p|n]g" tmp$i.html)
-			#get img type
-			file_type=${img#*.}
-			file_type=${file_type#*.}
-			file_type=${file_type#*.}
-			if [ ! -f $i.$file_type ]; then
-				wget -q $img &
-				flag=1
-				# echo "$i "
+			#skip if file already exists, ought to be right
+			if [ -e $i.jpg ]; then
+				continue
 			fi
+			if [ -e $i.png ]; then
+				continue
+			fi
+
+			#flaged since there's still image loss
+			flag=1
+
+			#resend html request
+			curl -s https://nhentai.net/g/$1/$i/ >tmp$i.html
+			img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p][p|n]g" tmp$i.html)
+
+			#get img type
+			wget -q $img &
+			# echo "$i "
+			rm tmp$i.html
 		done
+
 		if [ $flag -eq 0 ]; then
 			break
 		fi
-		# sleep 0.1
 	done
 	if [ $flag -eq 0 ]; then
 		break
 	fi
 done
 
-rm tmp*.html
-ls | grep -P "[0|1|2|3|4|5|6|7|8|9]$" | xargs -d"\n" rm
+# rm tmp*.html
+# ls | grep -P "[0|1|2|3|4|5|6|7|8|9]$" | xargs -d"\n" rm
