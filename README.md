@@ -1,5 +1,5 @@
 This is an simple bash script to download galleries from nhentai, \
-all the downloaded galleries will be stored at ~/nh/{the six digits code} folder.
+all the downloaded galleries will be stored at ~/nh/{the six digits code} folder (This script will not `mkdir ~/nh` for you, so you'll have to do it yourself).
 
 There is a known issue with downloading same image for multiple times, just simply use \
 `find ~/nh -type f -name "*.[1|2|3|4|5|6|7|8|9]*" -delete` to delete those files.
