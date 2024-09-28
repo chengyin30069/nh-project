@@ -16,6 +16,8 @@ cd $1
 
 declare max_page=0
 
+touch tmp.html
+
 for i in $(seq 1 500)
 do
 #skip if image already exists, should be alright
@@ -25,22 +27,24 @@ do
 	if [ -e $i.png ]; then
 		continue
 	fi
+	if [ -e $i.gif ]; then
+		continue
+	fi
 
 #download html of nhentai.net/g/NUMBER/$i
-	curl -s https://nhentai.net/g/$1/$i/ > tmp$i.html
+	curl -s https://nhentai.net/g/$1/$i/ > tmp.html
 
 #check if it's 404 or not, break if it is
 	# echo $(grep -o -e "404 - Not Found" tmp.html)
-	if [ "$(grep -o -e "404 - Not Found" tmp$i.html)" == "404 - Not Found" ]; then
+	if [ "$(grep -o -e "404 - Not Found" tmp.html)" == "404 - Not Found" ]; then
 		max_page=$(($i-1))
-		rm tmp$i.html
 		break
 	fi
 	# echo $i
 
 
 #grep to get the source of image
-	img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p][p|n]g" tmp$i.html)
+	img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p|g][p|n|i][g|f]" tmp.html)
 	# echo $img
 
 #wget to download it
@@ -51,7 +55,6 @@ do
 		wget -q $img &
 	fi
 	echo "$1: $i"
-	rm tmp$i.html
 done
 
 #echo $max_page
@@ -73,18 +76,20 @@ do
 			if [ -e $i.png ]; then
 				continue
 			fi
+			if [ -e $i.gif ]; then
+				continue
+			fi
 
 			#flaged since there's still image loss
 			flag=1
 
 			#resend html request
-			curl -s https://nhentai.net/g/$1/$i/ >tmp$i.html
-			img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p][p|n]g" tmp$i.html)
+			curl -s https://nhentai.net/g/$1/$i/ > tmp.html
+			img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p|g][p|n|i][g|f]" tmp.html)
 
 			#get img type
 			wget -q $img &
 			# echo "$i "
-			rm tmp$i.html
 		done
 
 		if [ $flag -eq 0 ]; then
@@ -96,5 +101,6 @@ do
 	fi
 done
 
+rm tmp.html
 # rm tmp*.html
 # ls | grep -P "[0|1|2|3|4|5|6|7|8|9]$" | xargs -d"\n" rm
