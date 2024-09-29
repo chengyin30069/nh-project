@@ -4,6 +4,7 @@
 # ref: https://stackoverflow.com/a/2173421
 trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM
 
+# IDS="529160"
 IDS="529160 528484 520419 514200 501156 501062 498434 498070 495835 493857 491474 486140 479564 464382 456202 447645 433951 429934 424562 422683 414786 400733 391273 391040"
 
 if [ ! -e ~/nh ]; then 
@@ -28,4 +29,9 @@ echo "nh2_old.sh ended at $(date +%Y%m%d-%H%M%S.%N)" >> testlog
 
 find ~/nh -type f -name "*.[1|2|3|4|5|6|7|8|9]*" -delete
 
-diff -r ~/nh ~/nh_new
+diff -r ~/nh ~/nh_new >> testlog
+
+echo 
+echo 
+echo "Here is the testlog: "
+cat testlog
