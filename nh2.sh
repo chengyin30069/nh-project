@@ -44,7 +44,7 @@ do
 
 
 #grep to get the source of image
-	img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p|g][p|n|i][g|f]" tmp.html)
+	img=$(grep -o -E "https://i[1-9].nhentai.net/galleries/[0-9]*/[1-9][0-9]*.(jpg|png|gif)" tmp.html)
 	# echo $img
 
 #wget to download it
@@ -85,7 +85,7 @@ do
 
 			#resend html request
 			curl -s https://nhentai.net/g/$1/$i/ > tmp.html
-			img=$(grep -o -e "https://i[1|2|3|4|5|6|7|8|9].nhentai.net/galleries/[0|1|2|3|4|5|6|7|8|9]*/[1|2|3|4|5|6|7|8|9][0|1|2|3|4|5|6|7|8|9]*.[j|p|g][p|n|i][g|f]" tmp.html)
+			img=$(grep -o -E "https://i[1-9].nhentai.net/galleries/[0-9]*/[1-9][0-9]*.(jpg|png|gif)" tmp.html)
 
 			#get img type
 			wget -q $img &
@@ -100,6 +100,12 @@ do
 		break
 	fi
 done
+
+#download main page html
+
+# curl -s https://nhentai.net/g/$1/ > ~/nh/html_page/$1.html
+
+#download book cover
 
 rm tmp.html
 # rm tmp*.html
