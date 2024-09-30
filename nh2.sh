@@ -11,6 +11,10 @@ if [ "$1" == "help" ] ; then
 fi
 
 cd ~/nh
+if [ -e $1.cbz ]; then
+	echo "Already downloaded this gallery!"
+	exit 0
+fi
 mkdir $1
 cd $1
 
