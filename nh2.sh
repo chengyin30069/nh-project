@@ -67,7 +67,7 @@ done
 for k in $(seq 1 50)
 do
 	flag=0
-	sleep 1
+	sleep 1 #wait for images to be downloaded
 	for j in $(seq 1 10)
 	do
 		flag=0
@@ -91,7 +91,6 @@ do
 			curl -s https://nhentai.net/g/$1/$i/ > tmp.html
 			img=$(grep -o -E "https://i[1-9].nhentai.net/galleries/[0-9]*/[1-9][0-9]*.(jpg|png|gif)" tmp.html)
 
-			#get img type
 			wget -q $img &
 			# echo "$i "
 		done
@@ -104,12 +103,6 @@ do
 		break
 	fi
 done
-
-#download main page html
-
-# curl -s https://nhentai.net/g/$1/ > ~/nh/html_page/$1.html
-
-#download book cover
 
 rm tmp.html
 # rm tmp*.html
