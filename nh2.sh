@@ -10,38 +10,45 @@ if [ "$1" == "help" ] ; then
 	exit 0
 fi
 
-cd ~/nh
-if [ -e $1.cbz ]; then
+cd ~/nh || exit 1
+if [ -e "$1".cbz ]; then
 	echo "Already downloaded this gallery!"
 	exit 0
 fi
-mkdir $1
-cd $1
+mkdir "$1" || echo "Folder already exists"
+cd "$1" || exit 1
 
 declare max_page=0
 
 touch tmp.html
 
+curl -s https://nhentai.net/g/"$1"/ > tmp.html
+
+if [ "$(grep -o -E "404 - Not Found" tmp.html)" == "404 - Not Found" ]; then
+	echo "Gallery does not exists"
+	exit 1
+fi
+
 for i in $(seq 1 500)
 do
 #skip if image already exists, should be alright
-	if [ -e $i.jpg ]; then
+	if [ -e "$i".jpg ]; then
 		continue
 	fi
-	if [ -e $i.png ]; then
+	if [ -e "$i".png ]; then
 		continue
 	fi
-	if [ -e $i.gif ]; then
+	if [ -e "$i".gif ]; then
 		continue
 	fi
 
 #download html of nhentai.net/g/NUMBER/$i
-	curl -s https://nhentai.net/g/$1/$i/ > tmp.html
+	curl -s https://nhentai.net/g/"$1"/"$i"/ > tmp.html
 
 #check if it's 404 or not, break if it is
 	# echo $(grep -o -e "404 - Not Found" tmp.html)
 	if [ "$(grep -o -e "404 - Not Found" tmp.html)" == "404 - Not Found" ]; then
-		max_page=$(($i-1))
+		max_page=$((i-1))
 		break
 	fi
 	# echo $i
@@ -55,8 +62,8 @@ do
 	file_type=${img#*.}
 	file_type=${file_type#*.}
 	file_type=${file_type#*.}
-	if [ ! -f $i.$file_type ]; then
-		wget -q $img &
+	if [ ! -f "$i"."$file_type" ]; then
+		wget -q "$img" &
 	fi
 	echo "$1: $i"
 done
@@ -74,13 +81,13 @@ do
 		for i in $(seq 1 $max_page)
 		do
 			#skip if file already exists, ought to be right
-			if [ -e $i.jpg ]; then
+			if [ -e "$i".jpg ]; then
 				continue
 			fi
-			if [ -e $i.png ]; then
+			if [ -e "$i".png ]; then
 				continue
 			fi
-			if [ -e $i.gif ]; then
+			if [ -e "$i".gif ]; then
 				continue
 			fi
 
@@ -88,10 +95,10 @@ do
 			flag=1
 
 			#resend html request
-			curl -s https://nhentai.net/g/$1/$i/ > tmp.html
+			curl -s https://nhentai.net/g/"$1"/"$i"/ > tmp.html
 			img=$(grep -o -E "https://i[1-9].nhentai.net/galleries/[0-9]*/[1-9][0-9]*.(jpg|png|gif)" tmp.html)
 
-			wget -q $img &
+			wget -q "$img" &
 			# echo "$i "
 		done
 
