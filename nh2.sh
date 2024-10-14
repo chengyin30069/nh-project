@@ -26,6 +26,8 @@ curl -s https://nhentai.net/g/"$1"/ > tmp.html
 
 if [ "$(grep -o -E "404 - Not Found" tmp.html)" == "404 - Not Found" ]; then
 	echo "Gallery does not exists"
+	cd
+	rm -r "$1"
 	exit 1
 fi
 
