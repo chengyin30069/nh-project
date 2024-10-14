@@ -8,4 +8,4 @@ will try to find a work around in the future.
 
 Also check [Kevin's fork](https://github.com/XiaoPanPanKevinPan/nh-project), he rewrote it with different method,\
 you can also get it from branch [Kevin's-method](https://github.com/chengyin30069/nh-project/tree/Kevin's-Method)
-will be working with him on adding new features on this branch.\
+will be working with him on adding new features on this branch.
