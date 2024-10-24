@@ -11,10 +11,12 @@ if [ "$1" == "help" ] ; then
 fi
 
 cd ~/nh
+if [ -e $1.cbz ]; then
+	echo "Already downloaded this gallery!"
+	exit 0
+fi
 mkdir $1
 cd $1
-
-declare JOBS=""
 
 declare max_page=0
 
@@ -55,7 +57,6 @@ do
 	file_type=${file_type#*.}
 	if [ ! -f $i.$file_type ]; then
 		wget -q $img &
-		JOBS="$JOBS $!"
 	fi
 	echo "$1: $i"
 done
@@ -92,7 +93,6 @@ do
 
 			#get img type
 			wget -q $img &
-			JOBS="$JOBS $!"
 			# echo "$i "
 		done
 
@@ -114,7 +114,3 @@ done
 rm tmp.html
 # rm tmp*.html
 # ls | grep -P "[0|1|2|3|4|5|6|7|8|9]$" | xargs -d"\n" rm
-
-for PID in $JOBS; do 
-	wait $PID;
-done;
