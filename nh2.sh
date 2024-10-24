@@ -17,6 +17,10 @@ trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM
 
 # directory for saving the image
 cd ~/nh
+if [ -e "$1".cbz ]; then
+	echo "Already downloaded"
+	exit 0
+fi
 mkdir $1
 cd $1
 
@@ -112,3 +116,4 @@ while [ -n "$JOBS" ]; do
 	update-jobs;
 done;
 
+rm cover_page.html
