@@ -16,23 +16,23 @@ fi
 trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM
 
 # directory for saving the image
-cd ~/nh
+cd ~/nh || exit 1
 if [ -e "$1".cbz ]; then
-	echo "Already downloaded"
+	echo "Already downloaded this gallery!"
 	exit 0
 fi
-mkdir $1
-cd $1
+mkdir "$1" || echo "Folder already exists"
+cd "$1" || exit 1
 
 # fetch the cover page and save it
-declare COVER_HTML="$(wget -q -O - https://nhentai.net/g/$1/)"
+declare COVER_HTML="$(wget -q -O - https://nhentai.net/g/"$1"/)"
 echo "$COVER_HTML" > cover_page.html
 
 # a command to download with auto-retrying
 download-with-auto-retry() {
 	declare FILENAME=$1
 	declare URL=$2
-	touch $FILENAME
+	touch "$FILENAME"
 
 	wget -q -O "$FILENAME" "$URL"
 	declare LAST_WGET_DOWNLOAD_RET=$?
@@ -106,7 +106,7 @@ for URL in $IMAGE_URLS; do
 	done
 
 	# download the file with auto-retrying
-	download-with-auto-retry $FILENAME $URL &
+	download-with-auto-retry "$FILENAME" "$URL" &
 	JOBS+=("$!")
 done;
 
