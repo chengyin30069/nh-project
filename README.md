@@ -1,3 +1,8 @@
+# Current status: broken
+
+Due to the new mechanism nhentai added recently(Cloudflare captcha), issues may occur while fetching the site using wget, \
+will try to find a workaround after my lunar new year holiday. \
+
 This is a simple bash script to download galleries from nhentai, \
 just type `./nh2.sh $NUMBER` and you'll get your gallery at ~/nh/$NUMBER.\
 Note that this script will not `mkdir ~/nh` for you, so you'll have to do it yourself or it wouldn't work
