@@ -354,11 +354,13 @@ for ID in "${ID_LIST[@]}"; do
 	declare PAGE_COUNT
 	PAGE_COUNT="$(echo "$COVER_HTML" | grep "<span class=\"tags\"><a class=\"tag\" href=\"/search/?q=pages" | grep -oEe "<span class=\"name\">[0-9]*" | grep -oEe "[0-9]*")"
 	
+	MAXIMUM=100
+
 	# adjust MAX_JOB_COUNT based on page count if not manually set
 	if [ -n "$PAGE_COUNT" ] && [ "$PAGE_COUNT" -gt 0 ]; then
 		# only use auto-detected value if user didn't specify parallel option
 		if [ "$MAX_JOB_COUNT" -eq 1 ]; then
-			MAX_JOB_COUNT="$PAGE_COUNT"
+			MAX_JOB_COUNT=$(( PAGE_COUNT < MAXIMUM ? HALF_PAGE_COUNT : MAXIMUM ))
 			echo "Auto-detected $PAGE_COUNT pages, setting parallel jobs to $MAX_JOB_COUNT"
 		fi
 	fi
