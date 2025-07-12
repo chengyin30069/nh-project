@@ -3,15 +3,11 @@ FROM alpine:latest
 RUN apk update && \
     apk add --no-cache bash wget curl procps zip
 
-WORKDIR /
+WORKDIR /nh-project
 
-COPY *.sh ./
+COPY . .
 
-COPY nhentai.txt ./
-
-RUN sed -i 's/\r$//' *.sh
-
-RUN sed -i 's/\r$//' nhentai.txt
+RUN sed -i 's/\r$//' *.*
 
 RUN chmod +x *.sh
 
