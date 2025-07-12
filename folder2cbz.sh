@@ -2,7 +2,7 @@
 
 echo "Start zipping galleries"
 find ~/nh -type f -name "*.[0-9]*" -delete
-cd ~/nh
+cd ~/nh || cd /nh
 ls -tr | grep -E "^[0-9]*$" > tmp.txt
 galleries=$(cat tmp.txt | wc -l)
 i=1
