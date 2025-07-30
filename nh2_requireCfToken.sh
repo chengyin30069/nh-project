@@ -374,11 +374,13 @@ for ID in "${ID_LIST[@]}"; do
 	declare IMAGE_URLS
 	IMAGE_URLS="$(echo "$COVER_HTML" \
 		| sed -E 's/>/\n/g' \
-		| grep -oEe 'https://t[0-9]+.nhentai\.net/galleries/[0-9]+/[0-9]+t\.[a-zA-Z]+' \
+		| grep -oEe '//t[0-9]+.nhentai\.net/galleries/[0-9]+/[0-9]+t\.[a-zA-Z]+' \
 		| sed -E 's/t(\.[a-zA-Z]{1,10})$/\1/g' | sed -E 's/\/\/t([0-9]+)\./\/\/i\1./' \
-		| awk '!a[$0]++'
+		| awk '!a[$0]++' \
+		| sed 's|^|https:|'
 	)"
 
+	# echo $IMAGE_URLS
 
 	for URL in $IMAGE_URLS; do 
 		# extract filename 
