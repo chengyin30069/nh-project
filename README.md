@@ -39,12 +39,10 @@ By using this project, you agree to the following conditions:
 
 By continuing to use this project, you acknowledge and agree to the above terms in full.  
 
----
-
 ### 中文
 
 本專案**僅供教育與研究用途**。  
-我們不鼓勵、宣傳或支持任何違反著作權法、授權條款或相關法規以及侵犯他人智慧財產權之任何法律行為，包括但不限於盜版、未經授權散佈受著作權法保護之內容。 \
+我們不鼓勵、宣傳或支持任何違反著作權法、授權條款或相關法規以及侵犯他人智慧財產權之任何法律行為，包括但不限於盜版、未經授權散佈受著作權法保護之內容。 
 
 使用本專案即表示您同意以下條款：  
 1. **遵守法律** – 您必須自行確保使用本專案的行為符合您所在司法管轄區的所有法律與規定。  
