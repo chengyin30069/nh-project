@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # constants
-VERSION="2024-10-03"
+VERSION="2025-08-11"
 
 # kill the whole process group of this script on Ctrl + C
 # ref: https://stackoverflow.com/a/2173421
@@ -296,7 +296,7 @@ download_with_auto_retry() {
 	declare URL="$2"
 	# touch "$FILENAME"
 
-	wget -q -O "$FILENAME" "$URL"
+	aria2c -x4 -q -o "$FILENAME" "$URL"
 	declare LAST_WGET_DOWNLOAD_RET=$?
 		# by using `dig i${n}.nhentai.net`, we can see only these three
 		# servers have IPv4 addresses and are thus valid
@@ -311,7 +311,7 @@ download_with_auto_retry() {
 		declare ALTER_URL
 		ALTER_URL=$(echo "$URL" | sed -E "s/\/\/(i|t)[0-9]*\./\/\/\1${ALTER_MEDIA_SERVER}./")
 		echo "$FILENAME error. Retrying with media_server=$ALTER_MEDIA_SERVER ($i/$MAX_RETRY)..."
-		wget -q -O "$FILENAME" "$ALTER_URL"
+		aria2c -x4 -q -o "$FILENAME" "$ALTER_URL"
 		LAST_WGET_DOWNLOAD_RET=$?
 	done
 

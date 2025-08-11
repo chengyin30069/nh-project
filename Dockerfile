@@ -1,7 +1,7 @@
 FROM alpine:latest
 
 RUN apk update && \
-    apk add --no-cache bash wget curl procps zip
+    apk add --no-cache bash aria2 wget procps zip
 
 WORKDIR /nh-project
 
@@ -11,4 +11,4 @@ RUN sed -i 's/\r$//' *.*
 
 RUN chmod +x *.sh
 
-CMD ["/bin/bash","download.sh", "nhentai.txt"]
+CMD ["/nh-project/download.sh", "nhentai.txt"]
