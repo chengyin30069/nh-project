@@ -1,0 +1,14 @@
+[Unit]
+Description=nh-project LAN downloader HTTP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/nh-project
+ExecStart=/usr/bin/python3 %h/nh-project/server/nh_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -17,6 +17,54 @@ browser agent version in the script
 * wget
 * bash
 * procps (for alpine linux)
+* python3 (for the HTTP server)
+
+# Cookie config
+
+Copy `cookie.example.sh` to `cookie.sh`, then fill in the cookie and user agent from
+your browser. `cookie.sh` is ignored by git because it contains local secrets.
+
+```bash
+cp cookie.example.sh cookie.sh
+chmod 600 cookie.sh
+```
+
+# HTTP server
+
+The server listens on port `8765`, accepts requests only from
+`192.168.50.0/24`, `192.168.193.0/24`, and localhost, then queues downloads in
+the background.
+
+```bash
+python3 server/nh_server.py
+```
+
+Queue a download:
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/download \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"123456"}'
+```
+
+The downloader stores the final archive at `~/nh/123456.cbz`. The raw
+`~/nh/123456/` folder is removed only after the archive is created successfully.
+
+To install the user-level systemd service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/nh-downloader.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now nh-downloader.service
+```
+
+# Firefox extension
+
+Load `firefox-extension/` temporarily from `about:debugging`. On
+`https://nhentai.net/g/<id>/`, the extension injects a lower-right button that
+queues the current gallery through `192.168.50.144:8765`, falling back to
+`192.168.193.144:8765`. The server list can be changed in the extension options.
 
 # Using Docker
 For Windows users or who just want to use docker, simply build with Dockerfile we provided 

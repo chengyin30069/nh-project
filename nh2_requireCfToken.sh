@@ -22,16 +22,16 @@ print_help() {
     echo '                                Provides a cookie string to bypass CAPTCHA.'
 	echo '  -a, --user-agent="UA"         Provides a UA string to bypass CAPTCHA.'
 	echo "  -r, --max-retry=NUMBER        Times to retry downloading after failure."
-	echo "                                (default: 20)"
+	echo "                                (default: ${NH_MAX_RETRY:-20})"
 	echo '  -m, --media-server-list="SERVER1 SERVER2 ..."'
 	echo "                                List of alternative servers, space seperated."
 	echo "                                Used sequentially when retrying."
-	echo '                                (default: "3 7 5")'
+	echo "                                (default: \"${NH_MEDIA_SERVER_LIST:-1 2 3 4 5 6 7 8 9}\")"
 	echo '                                (Hint: "dig i$''{NUM}.nhentai.net" to test)'
 	echo '  -f, --folder-path=PATH        Specify a directory for image stroage.'
-	echo '                                (default: ~/nh)'
+	echo "                                (default: ${NH_FOLDER_PATH:-~/nh})"
 	echo '  -p, --parallel[=MAX_JOBS]     Max number of download jobs in parallel.'
-	echo '                                (default: 1 if not specified, 20 if presenting)'
+	echo "                                (default: ${NH_PARALLEL:-100} if not specified, 20 if presenting)"
 	echo '  -h, --help                    Show this message. (You may as well use the '
 	echo '                                keyword help to print out this help messege)'
 	echo '  -v, --version                 Show the version.'
@@ -192,13 +192,15 @@ parse_args() {
 }
 
 # == START OF parse the arguments ==
-declare MAX_JOB_COUNT=1
-declare MAX_RETRY=5
-declare MEDIA_SERVER_LIST=(3 7 5)
+declare MAX_JOB_COUNT="${NH_PARALLEL:-100}"
+declare MAX_RETRY="${NH_MAX_RETRY:-20}"
+declare MEDIA_SERVER_LIST
+IFS=" " read -r -a MEDIA_SERVER_LIST <<< "${NH_MEDIA_SERVER_LIST:-1 2 3 4 5 6 7 8 9}"
 declare ID_LIST=()
-declare FOLDER_PATH="$HOME/nh"
-declare COOKIE=""
-declare UA=""
+declare FOLDER_PATH="${NH_FOLDER_PATH:-$HOME/nh}"
+FOLDER_PATH="${FOLDER_PATH/#\~/$HOME}"
+declare COOKIE="${NH_COOKIE:-}"
+declare UA="${NH_USER_AGENT:-}"
 argument_callback() {
 	declare STATUS="$1"
 	declare FLAG="$2"
@@ -331,7 +333,12 @@ fi
 cd "$FOLDER_PATH" || throw "Failed to switch to the directory for storage, '$FOLDER_PATH'" 
 
 for ID in "${ID_LIST[@]}"; do 
-	mkdir "$ID" || throw "Failed to create the directory for book#$ID"
+	if [ -e "$ID.cbz" ]; then
+		echo "Already downloaded book#$ID ($ID.cbz exists)"
+		continue
+	fi
+
+	mkdir -p "$ID" || throw "Failed to create the directory for book#$ID"
 
 	# fetch the cover page and save it
 	echo "Parsing book#$ID..."

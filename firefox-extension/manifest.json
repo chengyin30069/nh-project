@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Nh Downloader Button",
+  "version": "1.0.0",
+  "description": "Queue the current nhentai gallery on your LAN downloader.",
+  "permissions": [
+    "http://192.168.50.144:8765/*",
+    "http://192.168.193.144:8765/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://nhentai.net/g/*"],
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ]
+}
