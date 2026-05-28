@@ -50,13 +50,12 @@ curl -X POST http://127.0.0.1:8765/api/download \
 The downloader stores the final archive at `~/nh/123456.cbz`. The raw
 `~/nh/123456/` folder is removed only after the archive is created successfully.
 
-To install the user-level systemd service:
+To install the systemd service:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp systemd/nh-downloader.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now nh-downloader.service
+sudo cp systemd/nh-downloader.service /etc/systemd/system/nh-downloader.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now nh-downloader.service
 ```
 
 # Firefox extension

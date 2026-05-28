@@ -5,10 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/nh-project
-ExecStart=/usr/bin/python3 %h/nh-project/server/nh_server.py
+User=linus
+Group=wheel
+Environment=HOME=/home/linus
+WorkingDirectory=/home/linus/nh-project
+ExecStart=/usr/bin/python3 /home/linus/nh-project/server/nh_server.py
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
