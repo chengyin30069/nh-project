@@ -175,6 +175,23 @@ class DownloadManager:
         with self.lock:
             return self.jobs.get(job_id)
 
+    def gallery_status(self, gallery_id: str) -> dict[str, object]:
+        if not is_valid_gallery_id(gallery_id):
+            raise ValueError("gallery id must contain digits only")
+
+        with self.lock:
+            job_id = self.active_by_gallery_id.get(gallery_id)
+            job = self.jobs.get(job_id) if job_id else None
+            return {
+                "id": gallery_id,
+                "downloaded": self.archive_path(gallery_id).exists(),
+                "job_id": job.job_id if job else None,
+                "status": job.status if job else None,
+            }
+
+    def galleries_status(self, gallery_ids: Iterable[str]) -> dict[str, dict[str, object]]:
+        return {gallery_id: self.gallery_status(gallery_id) for gallery_id in gallery_ids}
+
     def archive_path(self, gallery_id: str) -> Path:
         return self.storage_dir / f"{gallery_id}.cbz"
 
@@ -304,6 +321,13 @@ def make_handler(
                     return
                 self._send_json(job.to_dict())
                 return
+            if path.startswith("/api/galleries/"):
+                gallery_id = path.removeprefix("/api/galleries/")
+                if not is_valid_gallery_id(gallery_id):
+                    self._send_json({"error": "id must be a string of digits"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._send_json(manager.gallery_status(gallery_id))
+                return
             self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
@@ -311,7 +335,8 @@ def make_handler(
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
 
-            if urlparse(self.path).path != "/api/download":
+            path = urlparse(self.path).path
+            if path not in {"/api/download", "/api/galleries/status"}:
                 self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
 
@@ -319,6 +344,15 @@ def make_handler(
                 payload = self._read_json()
             except ValueError as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            if path == "/api/galleries/status":
+                gallery_ids = payload.get("ids")
+                if not isinstance(gallery_ids, list) or not all(is_valid_gallery_id(item) for item in gallery_ids):
+                    self._send_json({"error": "ids must be a list of digit strings"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                unique_ids = list(dict.fromkeys(gallery_ids))
+                self._send_json({"galleries": manager.galleries_status(unique_ids)})
                 return
 
             gallery_id = payload.get("id")

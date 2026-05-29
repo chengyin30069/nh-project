@@ -12,7 +12,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://nhentai.net/g/*"],
+      "matches": ["https://nhentai.net/*"],
       "js": ["content.js"],
       "css": ["content.css"]
     }

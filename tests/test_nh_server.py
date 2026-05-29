@@ -107,6 +107,19 @@ class DownloadManagerTests(unittest.TestCase):
             self.assertTrue(created)
             self.assertEqual(job.status, "succeeded")
 
+    def test_gallery_status_reports_existing_cbz(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp) / "nh"
+            storage.mkdir()
+            (storage / "123456.cbz").write_bytes(b"ready")
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+
+            status = manager.gallery_status("123456")
+
+            self.assertEqual(status["id"], "123456")
+            self.assertTrue(status["downloaded"])
+            self.assertIsNone(status["status"])
+
     def test_duplicate_running_id_returns_existing_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -216,6 +229,21 @@ class ApiTests(unittest.TestCase):
 
     def test_invalid_id_is_rejected(self):
         status, data = self.request("POST", "/api/download", {"id": "../123"})
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    def test_gallery_status_request(self):
+        self.storage.mkdir(parents=True)
+        (self.storage / "123456.cbz").write_bytes(b"ready")
+
+        status, data = self.request("POST", "/api/galleries/status", {"ids": ["123456", "654321"]})
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["galleries"]["123456"]["downloaded"])
+        self.assertFalse(data["galleries"]["654321"]["downloaded"])
+
+    def test_gallery_status_rejects_invalid_ids(self):
+        status, data = self.request("POST", "/api/galleries/status", {"ids": ["123456", "../bad"]})
         self.assertEqual(status, 400)
         self.assertIn("error", data)
 

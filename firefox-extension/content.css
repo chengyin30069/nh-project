@@ -1,34 +1,100 @@
-#nh-downloader-button {
+.nh-page-download-button,
+.nh-inline-download-button {
+  min-height: 38px;
+  border: 0 !important;
+  border-radius: 4px;
+  padding: 0 14px;
+  background: #1677b9 !important;
+  color: #fff !important;
+  font: 600 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+.nh-page-download-button {
   position: fixed;
   right: 18px;
   bottom: 18px;
   z-index: 2147483647;
-  min-width: 132px;
-  min-height: 42px;
-  border: 0;
-  border-radius: 8px;
-  padding: 0 14px;
-  background: #1677b9;
-  color: #fff;
-  font: 600 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   box-shadow: 0 8px 24px rgb(0 0 0 / 30%);
+}
+
+.nh-inline-download-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+  vertical-align: baseline;
+  line-height: 1.2;
+}
+
+.nh-downloader-card,
+.nh-downloader-overlay-target {
+  position: relative !important;
+}
+
+.nh-downloader-overlay-target {
+  isolation: isolate !important;
+}
+
+.nh-thumb-download-button,
+.nh-downloaded-marker {
+  position: absolute !important;
+  z-index: 2147483647 !important;
+  height: 24px;
+  border-radius: 6px;
+  font: 700 12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+}
+
+.nh-thumb-download-button {
+  top: 6px !important;
+  right: 6px !important;
+  min-width: 36px;
+  border: 0 !important;
+  padding: 0 8px;
+  background: #1677b9 !important;
+  color: #fff !important;
   cursor: pointer;
-  pointer-events: auto;
 }
 
-#nh-downloader-button:hover {
-  background: #1e8ed8;
+.nh-downloaded-marker {
+  top: 6px !important;
+  left: 6px !important;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  background: #238847 !important;
+  color: #fff !important;
+  pointer-events: none;
 }
 
-#nh-downloader-button:disabled {
+.nh-page-download-button:hover,
+.nh-inline-download-button:hover,
+.nh-thumb-download-button:hover {
+  background: #1e8ed8 !important;
+}
+
+.nh-page-download-button:disabled,
+.nh-inline-download-button:disabled,
+.nh-thumb-download-button:disabled {
   cursor: default;
   opacity: 0.86;
 }
 
-#nh-downloader-button[data-state="done"] {
-  background: #238847;
+.nh-page-download-button[data-state="done"],
+.nh-inline-download-button[data-state="done"],
+.nh-thumb-download-button[data-state="done"] {
+  background: #238847 !important;
 }
 
-#nh-downloader-button[data-state="error"] {
-  background: #b73535;
+.nh-page-download-button[data-state="downloaded"],
+.nh-inline-download-button[data-state="downloaded"],
+.nh-thumb-download-button[data-state="downloaded"] {
+  background: #238847 !important;
+}
+
+.nh-page-download-button[data-state="error"],
+.nh-inline-download-button[data-state="error"],
+.nh-thumb-download-button[data-state="error"] {
+  background: #b73535 !important;
 }

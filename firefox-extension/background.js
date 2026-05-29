@@ -17,20 +17,38 @@ async function requestDownload(server, id) {
   return { server, body };
 }
 
-browser.runtime.onMessage.addListener((message) => {
-  if (message.type !== "download") {
-    return false;
-  }
+async function requestStatuses(server, ids) {
+  const response = await fetch(`${server}/api/galleries/status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
 
-  return (async () => {
-    let lastError = null;
-    for (const server of SERVERS) {
-      try {
-        return await requestDownload(server, message.id);
-      } catch (error) {
-        lastError = error;
-      }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  return { server, body };
+}
+
+async function tryServers(callback) {
+  let lastError = null;
+  for (const server of SERVERS) {
+    try {
+      return await callback(server);
+    } catch (error) {
+      lastError = error;
     }
-    throw lastError || new Error("No downloader server responded");
-  })();
+  }
+  throw lastError || new Error("No downloader server responded");
+}
+
+browser.runtime.onMessage.addListener((message) => {
+  if (message.type === "download") {
+    return tryServers((server) => requestDownload(server, message.id));
+  }
+  if (message.type === "statuses") {
+    return tryServers((server) => requestStatuses(server, message.ids));
+  }
+  return false;
 });
