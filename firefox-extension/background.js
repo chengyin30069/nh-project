@@ -1,6 +1,7 @@
 const SERVERS = [
   "http://192.168.50.144:8765",
   "http://192.168.193.144:8765",
+  "http://100.109.167.26:8765",
 ];
 
 async function requestDownload(server, id) {
