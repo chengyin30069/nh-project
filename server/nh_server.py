@@ -54,16 +54,19 @@ ABS_NHENTAI_HREF_RE = re.compile(
     r'(?P<prefix>\s(?:href|action)=["\'])https://nhentai\.net(?P<url>/[^"\']*)(?P<suffix>["\'])',
     re.IGNORECASE,
 )
-PAGE_IMAGE_RE = re.compile(
-    r'(?P<prefix><img\b[^>]*\bsrc=["\'])https://i[0-9]*\.nhentai\.net/galleries/[0-9]+/[0-9]+\.(?:jpg|jpeg|png|gif|webp)(?P<suffix>["\'][^>]*>)',
-    re.IGNORECASE,
-)
+IMAGE_INDEX_FILENAME = ".images.json"
 LOCAL_NAVIGATION_SCRIPT = """<script>
 (function () {
   function isLocalHttpUrl(url) {
     return url.origin === window.location.origin && /^(http|https):$/.test(url.protocol);
   }
   document.addEventListener("click", function (event) {
+    var interactive = event.target && event.target.closest
+      ? event.target.closest("button, input, select, textarea, [role='button'], #nh-delete-modal")
+      : null;
+    if (interactive) {
+      return;
+    }
     var anchor = event.target && event.target.closest ? event.target.closest("a[href]") : null;
     if (!anchor || anchor.target || anchor.hasAttribute("download")) {
       return;
@@ -739,6 +742,8 @@ class LocalLibrary:
             cache_settings or CacheSettings.from_env(self.env),
             autostart=cache_autostart,
         )
+        self._image_indexes: dict[str, tuple[int, tuple[Path, ...]]] = {}
+        self._image_index_lock = threading.Lock()
 
     def gallery_html(self, gallery_id: str) -> str:
         cache_path = self.manager.local_html_dir(gallery_id) / "cover_page.html"
@@ -755,22 +760,9 @@ class LocalLibrary:
     def reader_html(self, gallery_id: str, page: str) -> str:
         if not self.manager.archive_path(gallery_id).exists():
             return self._download_required_html(gallery_id)
-        local_image = self.page_image_path(gallery_id, page)
-        if local_image is None:
-            return self._fallback_reader_html(gallery_id, page, None)
-        try:
-            source, stale = self._cached_html(
-                self.manager.local_html_dir(gallery_id) / f"{page}.html",
-                f"/g/{gallery_id}/{page}/",
-            )
-        except Exception:
-            return self._fallback_reader_html(gallery_id, page, f"/media/{gallery_id}/{quote(local_image.name)}")
-
-        local_src = f"/media/{gallery_id}/{quote(local_image.name)}"
-        replaced = PAGE_IMAGE_RE.sub(rf'\g<prefix>{local_src}\g<suffix>', source, count=1)
-        if replaced != source:
-            return self.rewrite_html(replaced, stale=stale)
-        return self._fallback_reader_html(gallery_id, page, local_src)
+        images = self._gallery_images(gallery_id)
+        local_image = next((path for path in images if path.stem == page), None)
+        return self._local_reader_html(gallery_id, page, images, local_image)
 
     def proxy_html(self, path_with_query: str) -> str:
         if not self.is_public_html_path(path_with_query):
@@ -809,33 +801,10 @@ class LocalLibrary:
         return ProxyResponse(response.data, response.content_type, response.status)
 
     def page_image_path(self, gallery_id: str, page: str) -> Path | None:
-        extract_dir = self._ensure_extracted(gallery_id)
-        if extract_dir is None:
-            return None
-        candidates = [
-            path
-            for path in extract_dir.rglob("*")
-            if path.is_file()
-            and path.stem == page
-            and path.suffix.lower() in IMAGE_SUFFIXES
-        ]
-        if candidates:
-            self.cache.touch_extract(extract_dir)
-        return sorted(candidates)[0] if candidates else None
+        return next((path for path in self._gallery_images(gallery_id) if path.stem == page), None)
 
     def media_path(self, gallery_id: str, filename: str) -> Path | None:
-        extract_dir = self._ensure_extracted(gallery_id)
-        if extract_dir is None:
-            return None
-        for path in extract_dir.rglob(filename):
-            if path.is_file() and path.name == filename:
-                try:
-                    path.resolve().relative_to(extract_dir.resolve())
-                except ValueError:
-                    continue
-                self.cache.touch_extract(extract_dir)
-                return path
-        return None
+        return next((path for path in self._gallery_images(gallery_id) if path.name == filename), None)
 
     def rewrite_html(self, source: str, *, stale: bool = False) -> str:
         source = re.sub(r"<meta\b[^>]*(?:delegate-ch|tsyndicate|exoclick)[^>]*>", "", source, flags=re.IGNORECASE)
@@ -1012,6 +981,7 @@ class LocalLibrary:
                         target.parent.mkdir(parents=True, exist_ok=True)
                         with zf.open(member) as source, target.open("wb") as output:
                             shutil.copyfileobj(source, output)
+                self._write_image_index(temp_dir, self._scan_gallery_images(temp_dir))
                 (temp_dir / ".complete").write_text("ok\n", encoding="utf-8")
                 if extract_dir.exists():
                     shutil.rmtree(extract_dir)
@@ -1039,16 +1009,61 @@ class LocalLibrary:
         extract_dir = self._ensure_extracted(gallery_id)
         if extract_dir is None:
             return []
+        index_path = extract_dir / IMAGE_INDEX_FILENAME
+        try:
+            index_stamp = index_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            index_stamp = None
+        with self._image_index_lock:
+            cached = self._image_indexes.get(gallery_id)
+        if cached is not None and cached[0] == index_stamp:
+            return list(cached[1])
+
+        images = self._read_image_index(extract_dir, index_path)
+        if images is None:
+            with self.manager.gallery_lock(gallery_id):
+                images = self._read_image_index(extract_dir, index_path)
+                if images is None:
+                    images = self._scan_gallery_images(extract_dir)
+                    self._write_image_index(extract_dir, images)
+        index_stamp = index_path.stat().st_mtime_ns
+        with self._image_index_lock:
+            self._image_indexes[gallery_id] = (index_stamp, tuple(images))
+        return images
+
+    def _scan_gallery_images(self, extract_dir: Path) -> list[Path]:
         images = [
             path
             for path in extract_dir.rglob("*")
             if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES and path.stem.isdigit()
         ]
+        return sorted(images, key=lambda path: (int(path.stem), path.name, path.as_posix()))
 
-        def sort_key(path: Path) -> tuple[int, int | str, str]:
-            return (0, int(path.stem), path.name) if path.stem.isdigit() else (1, path.stem, path.name)
+    def _read_image_index(self, extract_dir: Path, index_path: Path) -> list[Path] | None:
+        try:
+            entries = json.loads(index_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
+            return None
+        images: list[Path] = []
+        for entry in entries:
+            path = extract_dir / entry
+            try:
+                path.resolve().relative_to(extract_dir.resolve())
+            except ValueError:
+                return None
+            if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+                return None
+            images.append(path)
+        return images
 
-        return sorted(images, key=sort_key)
+    def _write_image_index(self, extract_dir: Path, images: list[Path]) -> None:
+        index_path = extract_dir / IMAGE_INDEX_FILENAME
+        entries = [path.relative_to(extract_dir).as_posix() for path in images]
+        temp = index_path.with_name(f".{index_path.name}.{uuid.uuid4().hex}.tmp")
+        temp.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, index_path)
 
     def _fallback_gallery_html(self, gallery_id: str) -> str:
         title = f"Gallery {gallery_id}"
@@ -1077,20 +1092,29 @@ class LocalLibrary:
             f"<p><a href=\"/g/{gallery_id}/\">Back to gallery</a></p></main></body></html>"
         )
 
-    def _fallback_reader_html(self, gallery_id: str, page: str, image_src: str | None) -> str:
+    def _local_reader_html(self, gallery_id: str, page: str, images: list[Path], image_path: Path | None) -> str:
         title = f"Gallery {gallery_id} - page {page}"
+        image_src = f"/media/{gallery_id}/{quote(image_path.name)}" if image_path else None
         image = f'<img src="{html.escape(image_src)}" alt="{html.escape(title)}">' if image_src else "<p>Page image unavailable.</p>"
-        page_count = len(self._gallery_images(gallery_id))
+        page_count = len(images)
         next_page = str(min(int(page) + 1, page_count or int(page) + 1)) if page.isdigit() else page
         prev_page = str(max(int(page) - 1, 1)) if page.isdigit() else page
+        next_image = next((path for path in images if path.stem == next_page), None)
+        preload = f'<link rel="preload" as="image" href="/media/{gallery_id}/{quote(next_image.name)}">' if next_image and next_page != page else ""
         return (
             "<!doctype html><html><head>"
-            f"<title>{html.escape(title)}</title>"
+            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>{preload}'
             "<style>body{margin:0;background:#111;color:#eee;text-align:center;font-family:sans-serif}"
-            "nav{padding:12px}a{color:#8cc8ff;margin:0 12px}img{max-width:100%;height:auto}</style>"
+            "nav{position:sticky;top:0;z-index:2;padding:12px;background:#111e}a{color:#8cc8ff;margin:0 12px}"
+            "img{display:block;max-width:100%;height:auto;margin:auto}</style>"
             "</head><body>"
             f"<nav><a href=\"/g/{gallery_id}/\">Gallery</a><a href=\"/g/{gallery_id}/{prev_page}/\">Prev</a>"
-            f"<a href=\"/g/{gallery_id}/{next_page}/\">Next</a></nav>{image}</body></html>"
+            f"<span>{html.escape(page)} / {page_count}</span><a href=\"/g/{gallery_id}/{next_page}/\">Next</a></nav>"
+            f'<a href="/g/{gallery_id}/{next_page}/" aria-label="Next page">{image}</a>'
+            "<script>document.addEventListener('keydown',function(e){"
+            f"if(e.key==='ArrowLeft')location.href='/g/{gallery_id}/{prev_page}/';"
+            f"if(e.key==='ArrowRight')location.href='/g/{gallery_id}/{next_page}/';"
+            "});</script></body></html>"
         )
 
 
@@ -1298,7 +1322,7 @@ def make_library_handler(
                 if media_path is None:
                     self._send_text("not found", status=HTTPStatus.NOT_FOUND)
                     return
-                self._send_file(media_path)
+                self._send_file(media_path, cache_control="private, max-age=3600")
                 return
 
             gallery_match = GALLERY_PAGE_RE.fullmatch(path)
@@ -1378,11 +1402,12 @@ def make_library_handler(
         def _send_text(self, payload: str, status: HTTPStatus = HTTPStatus.OK) -> None:
             self._send_bytes(payload.encode("utf-8"), "text/plain; charset=utf-8", status=status)
 
-        def _send_file(self, path: Path) -> None:
+        def _send_file(self, path: Path, *, cache_control: str | None = None) -> None:
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             with path.open("rb") as source:
                 data = source.read()
-            self._send_bytes(data, content_type)
+            headers = {"Cache-Control": cache_control} if cache_control else None
+            self._send_bytes(data, content_type, extra_headers=headers)
 
         def _send_proxy(self, response: ProxyResponse) -> None:
             extra_headers = {"X-NH-Cache": "stale"} if response.stale else None

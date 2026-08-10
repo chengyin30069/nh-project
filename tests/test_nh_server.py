@@ -577,14 +577,18 @@ class LocalLibraryTests(unittest.TestCase):
             manager = DownloadManager(storage_dir=storage, autostart=False)
             with zipfile.ZipFile(storage / "123456.cbz", "w") as zf:
                 zf.writestr("1.jpg", b"image")
-            library = StubLibrary(manager, {})
+                zf.writestr("2.jpg", b"next")
+            library = StubLibrary(manager, {"/g/123456/1/": "remote reader must not be fetched"})
 
             rendered = library.reader_html("123456", "1")
             media_path = library.media_path("123456", "1.jpg")
 
             self.assertIn("/media/123456/1.jpg", rendered)
+            self.assertIn('rel="preload" as="image" href="/media/123456/2.jpg"', rendered)
+            self.assertEqual(library.fetches, [])
             self.assertIsNotNone(media_path)
             self.assertEqual(media_path.read_bytes(), b"image")
+            self.assertTrue((manager.local_extract_dir("123456") / ".images.json").exists())
 
     def test_reader_without_cbz_never_fetches_remote_reader(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -638,6 +642,7 @@ class LocalLibraryTests(unittest.TestCase):
 
             self.assertEqual(response.status, 200)
             self.assertEqual(body, b"image")
+            self.assertEqual(response.getheader("Cache-Control"), "private, max-age=3600")
 
     def test_library_same_origin_status_api_and_local_asset(self):
         with tempfile.TemporaryDirectory() as tmp:

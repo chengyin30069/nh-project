@@ -75,7 +75,10 @@ tracking, popups, and account-only routes are removed. Gallery cards and detail
 pages get local download status plus download/delete controls. Thumbnails keep
 their original CDN URLs; full reader images are served only from local
 `{id}.cbz` archives. An undownloaded reader page shows a download prompt instead
-of loading remote full-size images.
+of loading remote full-size images. Downloaded galleries use a fully local
+reader: the CBZ is extracted once, a persistent image index avoids rescanning
+the directory on every request, and the next page image is preloaded. Reader
+navigation never fetches per-page HTML from nhentai.
 
 Cached HTML, read-only API responses, metadata, and extracted CBZ files live
 under `~/nh/.nh-local/`. HTML is fresh for 15 minutes, public API JSON is
