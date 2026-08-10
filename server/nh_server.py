@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 import queue
+import random
 import re
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -44,6 +45,7 @@ GALLERY_ID_RE = re.compile(r"^[0-9]+$")
 GALLERY_PAGE_RE = re.compile(r"^/g/([0-9]+)/?$")
 GALLERY_READER_RE = re.compile(r"^/g/([0-9]+)/([0-9]+)/?$")
 MEDIA_RE = re.compile(r"^/media/([0-9]+)/([^/]+)$")
+PREVIEW_MEDIA_RE = re.compile(r"^/preview-media/([0-9]+)/([0-9]+)$")
 LOCAL_API_PREFIX = "/_nh-local/api"
 LOCAL_ASSET_PREFIX = "/_nh-local/assets"
 MAX_JSON_BODY_BYTES = 64 * 1024
@@ -55,6 +57,8 @@ ABS_NHENTAI_HREF_RE = re.compile(
     re.IGNORECASE,
 )
 IMAGE_INDEX_FILENAME = ".images.json"
+ARCHIVE_COVER_RE = re.compile(r'<meta\s+itemprop=["\']image["\']\s+content=["\'](?P<url>(?://|https://)[^"\']+)["\']', re.IGNORECASE)
+ARCHIVE_TITLE_RE = re.compile(r'<meta\s+itemprop=["\']name["\']\s+content=["\'](?P<title>[^"\']+)["\']', re.IGNORECASE)
 LOCAL_NAVIGATION_SCRIPT = """<script>
 (function () {
   function isLocalHttpUrl(url) {
@@ -353,6 +357,7 @@ class DownloadManager:
                 self.local_html_dir(gallery_id),
                 self.local_metadata_path(gallery_id),
                 self.local_extract_dir(gallery_id),
+                self.local_preview_dir(gallery_id),
             ):
                 if path.is_dir():
                     shutil.rmtree(path)
@@ -389,6 +394,9 @@ class DownloadManager:
 
     def local_extract_dir(self, gallery_id: str) -> Path:
         return self.local_cache_root() / "extract" / gallery_id
+
+    def local_preview_dir(self, gallery_id: str) -> Path:
+        return self.local_cache_root() / "preview" / gallery_id
 
     def gallery_lock(self, gallery_id: str) -> threading.Lock:
         with self.lock:
@@ -505,6 +513,8 @@ class CacheSettings:
     html_max_age_seconds: int = 7 * 24 * 60 * 60
     html_max_bytes: int = 512 * 1024 * 1024
     extract_max_bytes: int = 5 * 1024 * 1024 * 1024
+    preview_max_age_seconds: int = 24 * 60 * 60
+    preview_max_bytes: int = 2 * 1024 * 1024 * 1024
     sweep_interval_seconds: int = 60 * 60
 
     @classmethod
@@ -515,6 +525,8 @@ class CacheSettings:
             "html_max_age_seconds": "NH_HTML_CACHE_MAX_AGE_SECONDS",
             "html_max_bytes": "NH_HTML_CACHE_MAX_BYTES",
             "extract_max_bytes": "NH_EXTRACT_CACHE_MAX_BYTES",
+            "preview_max_age_seconds": "NH_PREVIEW_CACHE_MAX_AGE_SECONDS",
+            "preview_max_bytes": "NH_PREVIEW_CACHE_MAX_BYTES",
             "sweep_interval_seconds": "NH_CACHE_SWEEP_INTERVAL_SECONDS",
         }
         values: dict[str, int] = {}
@@ -599,6 +611,7 @@ class LocalCache:
         try:
             self._cleanup_html()
             self._cleanup_extract(protect_extract=protect_extract)
+            self._cleanup_preview()
         finally:
             self.lock.release()
 
@@ -663,6 +676,39 @@ class LocalCache:
                     total -= size
             finally:
                 lock.release()
+
+    def _cleanup_preview(self) -> None:
+        root = self.manager.local_cache_root() / "preview"
+        if not root.exists():
+            return
+        now = time.time()
+        files: list[tuple[float, int, Path]] = []
+        for path in root.rglob("*"):
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            last_used = max(stat.st_atime, stat.st_mtime)
+            if now - last_used > self.settings.preview_max_age_seconds:
+                path.unlink(missing_ok=True)
+                continue
+            files.append((last_used, stat.st_size, path))
+        total = sum(item[1] for item in files)
+        for _last_used, size, path in sorted(files):
+            if total <= self.settings.preview_max_bytes:
+                break
+            try:
+                path.unlink()
+                total -= size
+            except FileNotFoundError:
+                pass
+        for directory in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
 
     def _sweep_loop(self) -> None:
         while not self.stop_event.wait(self.settings.sweep_interval_seconds):
@@ -744,6 +790,10 @@ class LocalLibrary:
         )
         self._image_indexes: dict[str, tuple[int, tuple[Path, ...]]] = {}
         self._image_index_lock = threading.Lock()
+        self._catalog_records: dict[str, tuple[int, dict[str, object]]] = {}
+        self._catalog_lock = threading.Lock()
+        self._last_random_ids: tuple[str, ...] = ()
+        self._random_lock = threading.Lock()
 
     def gallery_html(self, gallery_id: str) -> str:
         cache_path = self.manager.local_html_dir(gallery_id) / "cover_page.html"
@@ -758,11 +808,78 @@ class LocalLibrary:
         return self.rewrite_html(source, stale=stale)
 
     def reader_html(self, gallery_id: str, page: str) -> str:
-        if not self.manager.archive_path(gallery_id).exists():
-            return self._download_required_html(gallery_id)
-        images = self._gallery_images(gallery_id)
-        local_image = next((path for path in images if path.stem == page), None)
-        return self._local_reader_html(gallery_id, page, images, local_image)
+        if self.manager.archive_path(gallery_id).exists():
+            images = self._gallery_images(gallery_id)
+            local_image = next((path for path in images if path.stem == page), None)
+            return self._local_reader_html(gallery_id, page, images, local_image)
+        try:
+            metadata = self._preview_metadata(gallery_id)
+            pages = metadata.get("pages", [])
+            if not isinstance(pages, list):
+                pages = []
+            page_number = int(page)
+            image_src = f"/preview-media/{gallery_id}/{page_number}" if 1 <= page_number <= len(pages) else None
+            next_page = min(page_number + 1, len(pages)) if pages else page_number
+            next_src = f"/preview-media/{gallery_id}/{next_page}" if next_page != page_number else None
+            return self._reader_shell_html(gallery_id, page_number, len(pages), image_src, next_src, preview=True)
+        except Exception as exc:
+            return self._preview_unavailable_html(gallery_id, str(exc))
+
+    def downloaded_galleries_html(self, page: int) -> str:
+        archives = self._downloaded_archives()
+        page_count = max(1, (len(archives) + 24) // 25)
+        page = max(1, min(page, page_count))
+        selected = archives[(page - 1) * 25:page * 25]
+        records = [self._archive_catalog_record(path) for path in selected]
+        return self._catalog_page_html("Recently Downloaded", records, page=page, page_count=page_count)
+
+    def random_downloaded_html(self) -> str:
+        archives = self._downloaded_archives()
+        sample_size = min(5, len(archives))
+        with self._random_lock:
+            selected = random.sample(archives, sample_size)
+            if len(archives) > sample_size and tuple(path.stem for path in selected) == self._last_random_ids:
+                alternatives = [path for path in archives if path not in selected]
+                selected[-1] = random.choice(alternatives)
+                random.shuffle(selected)
+            self._last_random_ids = tuple(path.stem for path in selected)
+        records = [self._archive_catalog_record(path) for path in selected]
+        return self._catalog_page_html("Random 5 Downloads", records)
+
+    def preview_media_path(self, gallery_id: str, page: str) -> Path | None:
+        if self.manager.archive_path(gallery_id).exists():
+            return self.page_image_path(gallery_id, page)
+        metadata = self._preview_metadata(gallery_id)
+        pages = metadata.get("pages")
+        if not isinstance(pages, list):
+            return None
+        page_number = int(page)
+        if page_number < 1 or page_number > len(pages) or not isinstance(pages[page_number - 1], dict):
+            return None
+        remote_path = pages[page_number - 1].get("path")
+        if not isinstance(remote_path, str) or not remote_path.startswith("galleries/"):
+            return None
+        suffix = Path(remote_path).suffix.lower()
+        if suffix not in IMAGE_SUFFIXES:
+            return None
+        target = self.manager.local_preview_dir(gallery_id) / f"{page_number}{suffix}"
+        try:
+            if target.is_file():
+                target.touch()
+                return target
+        except FileNotFoundError:
+            pass
+        with self.manager.gallery_lock(gallery_id):
+            if target.is_file():
+                target.touch()
+                return target
+            data = self._fetch_cdn_image(remote_path, page_number)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            temp.write_bytes(data)
+            os.replace(temp, target)
+        self.cache.cleanup()
+        return target
 
     def proxy_html(self, path_with_query: str) -> str:
         if not self.is_public_html_path(path_with_query):
@@ -831,6 +948,7 @@ class LocalLibrary:
         rewritten = INTERNAL_HREF_RE.sub(lambda match: f"{match.group('prefix')}{match.group('url')}{match.group('suffix')}", rewritten)
         rewritten = re.sub(r'(?P<quote>["\'])(?:(?:\.\./)|(?:\./))+_app/', r'\g<quote>/_app/', rewritten)
         rewritten = self._inject_local_navigation(rewritten)
+        rewritten = self._inject_local_menu(rewritten)
         if stale:
             banner = '<div class="nh-local-stale">Upstream unavailable — showing cached content.</div>'
             rewritten = re.sub(r"(<body\b[^>]*>)", rf"\1{banner}", rewritten, count=1, flags=re.IGNORECASE)
@@ -849,6 +967,21 @@ class LocalLibrary:
         if "<head " in source:
             return re.sub(r"(<head\b[^>]*>)", rf"\1{assets}", source, count=1, flags=re.IGNORECASE)
         return f"{assets}{source}"
+
+    def _local_menu_html(self) -> str:
+        return (
+            '<nav class="nh-local-menu" data-nh-local-menu="true">'
+            '<a href="/">Home</a><a href="/downloads/">Downloads</a>'
+            '<a href="/downloads/random/">Random 5</a></nav>'
+        )
+
+    def _inject_local_menu(self, source: str) -> str:
+        if "data-nh-local-menu" in source:
+            return source
+        menu = self._local_menu_html()
+        if re.search(r"<body\b", source, flags=re.IGNORECASE):
+            return re.sub(r"(<body\b[^>]*>)", rf"\1{menu}", source, count=1, flags=re.IGNORECASE)
+        return f"{menu}{source}"
 
     def _cached_html(self, cache_path: Path, upstream_path: str) -> tuple[str, bool]:
         cached = self.cache.read_html(cache_path)
@@ -950,6 +1083,58 @@ class LocalLibrary:
         os.replace(temp, path)
         self.cache.cleanup()
 
+    def _preview_metadata(self, gallery_id: str) -> dict[str, object]:
+        path = self.manager.local_preview_dir(gallery_id) / "metadata.json"
+        try:
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(metadata, dict) and str(metadata.get("id")) == gallery_id:
+                path.touch()
+                return metadata
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+        response = self.public_api_response(f"/api/v2/galleries/{gallery_id}")
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(f"upstream metadata returned HTTP {response.status}")
+        metadata = json.loads(response.data)
+        if not isinstance(metadata, dict) or str(metadata.get("id")) != gallery_id or not isinstance(metadata.get("pages"), list):
+            raise ValueError("upstream gallery metadata is invalid")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temp.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, path)
+        self.cache.cleanup()
+        return metadata
+
+    def _fetch_cdn_image(self, remote_path: str, page_number: int) -> bytes:
+        configured = self.env.get("NH_MEDIA_SERVER_LIST", "1 2 3 4 5 6 7 8 9").split()
+        servers = [item for item in configured if item.isdigit() and 1 <= int(item) <= 9]
+        if not servers:
+            servers = ["1", "2", "3", "4"]
+        offset = (page_number - 1) % len(servers)
+        servers = servers[offset:] + servers[:offset]
+        headers = {}
+        if self.env.get("NH_USER_AGENT"):
+            headers["User-Agent"] = self.env["NH_USER_AGENT"]
+        last_error: Exception | None = None
+        safe_path = quote(remote_path.lstrip("/"), safe="/._-")
+        for server in servers:
+            request = Request(f"https://i{server}.nhentai.net/{safe_path}", headers=headers)
+            try:
+                with urlopen(request, timeout=20) as response:  # noqa: S310 - validated nhentai CDN host.
+                    final = urlparse(response.geturl())
+                    if final.scheme != "https" or not re.fullmatch(r"i[1-9]\.nhentai\.net", final.hostname or ""):
+                        raise PermissionError("image CDN redirected outside nhentai.net")
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    if not content_type.startswith("image/"):
+                        raise ValueError("preview response is not an image")
+                    data = response.read(100 * 1024 * 1024 + 1)
+                    if len(data) > 100 * 1024 * 1024:
+                        raise ValueError("preview image exceeds 100 MiB")
+                    return data
+            except Exception as exc:  # noqa: BLE001 - retry the configured CDN mirrors.
+                last_error = exc
+        raise RuntimeError(f"all preview image servers failed: {last_error}")
+
     def _ensure_extracted(self, gallery_id: str) -> Path | None:
         archive = self.manager.archive_path(gallery_id)
         if not archive.exists():
@@ -1004,6 +1189,96 @@ class LocalLibrary:
                 return zf.read(sorted(candidates)[0]).decode("utf-8", "replace")
         except (OSError, zipfile.BadZipFile, KeyError):
             return None
+
+    def _downloaded_archives(self) -> list[Path]:
+        archives = [path for path in self.manager.storage_dir.glob("*.cbz") if is_valid_gallery_id(path.stem)]
+        return sorted(archives, key=lambda path: (path.stat().st_mtime_ns, int(path.stem)), reverse=True)
+
+    def _archive_catalog_record(self, archive: Path) -> dict[str, object]:
+        stamp = archive.stat().st_mtime_ns
+        with self._catalog_lock:
+            cached = self._catalog_records.get(archive.stem)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        source = self._archive_cover_html(archive.stem) or ""
+        metadata: dict[str, object] = {}
+        match = WINDOW_GALLERY_RE.search(source)
+        if match:
+            try:
+                parsed = json.loads(json.loads(match.group("value")))
+                if isinstance(parsed, dict):
+                    metadata = parsed
+            except json.JSONDecodeError:
+                pass
+        title_data = metadata.get("title")
+        title = f"Gallery {archive.stem}"
+        if isinstance(title_data, dict):
+            title = str(title_data.get("pretty") or title_data.get("english") or title)
+        elif title_match := ARCHIVE_TITLE_RE.search(source):
+            title = html.unescape(title_match.group("title"))
+        cover_match = ARCHIVE_COVER_RE.search(source)
+        cover_url = cover_match.group("url") if cover_match else ""
+        if cover_url.startswith("//"):
+            cover_url = f"https:{cover_url}"
+        record: dict[str, object] = {
+            "id": archive.stem,
+            "title": title,
+            "cover_url": cover_url,
+            "downloaded_at": archive.stat().st_mtime,
+        }
+        with self._catalog_lock:
+            self._catalog_records[archive.stem] = (stamp, record)
+        return record
+
+    def _catalog_page_html(
+        self,
+        title: str,
+        records: list[dict[str, object]],
+        *,
+        page: int | None = None,
+        page_count: int | None = None,
+    ) -> str:
+        cards = []
+        for record in records:
+            gallery_id = html.escape(str(record["id"]))
+            gallery_title = html.escape(str(record["title"]))
+            cover_url = html.escape(str(record.get("cover_url") or ""))
+            image = f'<img loading="lazy" src="{cover_url}" alt="{gallery_title}">' if cover_url else '<div class="nh-catalog-placeholder">No cover</div>'
+            cards.append(
+                f'<div class="gallery"><a class="cover" href="/g/{gallery_id}/">{image}'
+                f'<div class="caption">{gallery_title}</div></a></div>'
+            )
+        pagination = ""
+        if page is not None and page_count is not None:
+            links = []
+            if page > 1:
+                links.append(f'<a href="/downloads/?page={page - 1}">Prev</a>')
+            links.append(f"<span>Page {page} / {page_count}</span>")
+            if page < page_count:
+                links.append(f'<a href="/downloads/?page={page + 1}">Next</a>')
+            pagination = f'<nav class="nh-catalog-pagination">{"".join(links)}</nav>'
+        return (
+            "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            f"<title>{html.escape(title)}</title>"
+            '<link rel="stylesheet" href="/_nh-local/assets/local.css"><script defer src="/_nh-local/assets/local.js"></script>'
+            "</head><body class=\"nh-catalog-body\">"
+            f"{self._local_menu_html()}{self._catalog_site_header_html()}"
+            f'<main class="nh-catalog-page"><section class="nh-catalog-panel"><h1><span aria-hidden="true">▰</span> {html.escape(title)}</h1>'
+            f'<div class="nh-catalog-grid">{"".join(cards)}</div>{pagination}</section></main></body></html>'
+        )
+
+    def _catalog_site_header_html(self) -> str:
+        return (
+            '<header class="nh-catalog-site-header"><a class="nh-catalog-logo" href="/" aria-label="Home">'
+            '<img src="/logo.svg" alt="nhentai"></a>'
+            '<form class="nh-catalog-search" action="/search/" method="get">'
+            '<input type="search" name="q" aria-label="Search" autocomplete="off">'
+            '<button type="submit" aria-label="Search">⌕</button></form>'
+            '<nav class="nh-catalog-primary-nav"><a href="/random/">Random</a><a href="/tags/">Tags</a>'
+            '<a href="/artists/">Artists</a><a href="/characters/">Characters</a>'
+            '<a href="/parodies/">Parodies</a><a href="/groups/">Groups</a>'
+            '<a href="/community/taxonomy/">Community</a></nav></header>'
+        )
 
     def _gallery_images(self, gallery_id: str) -> list[Path]:
         extract_dir = self._ensure_extracted(gallery_id)
@@ -1093,28 +1368,51 @@ class LocalLibrary:
         )
 
     def _local_reader_html(self, gallery_id: str, page: str, images: list[Path], image_path: Path | None) -> str:
-        title = f"Gallery {gallery_id} - page {page}"
         image_src = f"/media/{gallery_id}/{quote(image_path.name)}" if image_path else None
-        image = f'<img src="{html.escape(image_src)}" alt="{html.escape(title)}">' if image_src else "<p>Page image unavailable.</p>"
         page_count = len(images)
-        next_page = str(min(int(page) + 1, page_count or int(page) + 1)) if page.isdigit() else page
-        prev_page = str(max(int(page) - 1, 1)) if page.isdigit() else page
-        next_image = next((path for path in images if path.stem == next_page), None)
-        preload = f'<link rel="preload" as="image" href="/media/{gallery_id}/{quote(next_image.name)}">' if next_image and next_page != page else ""
+        page_number = int(page)
+        next_page = min(page_number + 1, page_count or page_number + 1)
+        next_image = next((path for path in images if path.stem == str(next_page)), None)
+        next_src = f"/media/{gallery_id}/{quote(next_image.name)}" if next_image and next_page != page_number else None
+        return self._reader_shell_html(gallery_id, page_number, page_count, image_src, next_src, preview=False)
+
+    def _reader_shell_html(
+        self,
+        gallery_id: str,
+        page_number: int,
+        page_count: int,
+        image_src: str | None,
+        next_image_src: str | None,
+        *,
+        preview: bool,
+    ) -> str:
+        title = f"Gallery {gallery_id} - page {page_number}"
+        next_page = min(page_number + 1, page_count or page_number + 1)
+        prev_page = max(page_number - 1, 1)
+        image = f'<img src="{html.escape(image_src)}" alt="{html.escape(title)}">' if image_src else "<p>Page image unavailable.</p>"
+        preload = f'<link rel="preload" as="image" href="{html.escape(next_image_src)}">' if next_image_src else ""
+        preview_label = '<span class="nh-preview-label">Temporary preview</span>' if preview else ""
         return (
             "<!doctype html><html><head>"
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>{preload}'
             "<style>body{margin:0;background:#111;color:#eee;text-align:center;font-family:sans-serif}"
             "nav{position:sticky;top:0;z-index:2;padding:12px;background:#111e}a{color:#8cc8ff;margin:0 12px}"
-            "img{display:block;max-width:100%;height:auto;margin:auto}</style>"
+            "img{display:block;max-width:100%;height:auto;margin:auto}.nh-preview-label{color:#f5b942;margin-left:12px}</style>"
             "</head><body>"
-            f"<nav><a href=\"/g/{gallery_id}/\">Gallery</a><a href=\"/g/{gallery_id}/{prev_page}/\">Prev</a>"
-            f"<span>{html.escape(page)} / {page_count}</span><a href=\"/g/{gallery_id}/{next_page}/\">Next</a></nav>"
+            f"{self._local_menu_html()}<nav><a href=\"/g/{gallery_id}/\">Gallery</a><a href=\"/g/{gallery_id}/{prev_page}/\">Prev</a>"
+            f"<span>{page_number} / {page_count}</span>{preview_label}<a href=\"/g/{gallery_id}/{next_page}/\">Next</a></nav>"
             f'<a href="/g/{gallery_id}/{next_page}/" aria-label="Next page">{image}</a>'
             "<script>document.addEventListener('keydown',function(e){"
             f"if(e.key==='ArrowLeft')location.href='/g/{gallery_id}/{prev_page}/';"
             f"if(e.key==='ArrowRight')location.href='/g/{gallery_id}/{next_page}/';"
             "});</script></body></html>"
+        )
+
+    def _preview_unavailable_html(self, gallery_id: str, error: str) -> str:
+        return (
+            "<!doctype html><html><head><meta charset=\"utf-8\"><title>Preview unavailable</title></head><body>"
+            f"{self._local_menu_html()}<main><h1>Preview unavailable</h1><p>{html.escape(error)}</p>"
+            f'<p><a href="/g/{gallery_id}/">Back to gallery</a></p></main></body></html>'
         )
 
 
@@ -1315,6 +1613,17 @@ def make_library_handler(
                     self._send_text(f"upstream API fetch failed: {exc}", status=HTTPStatus.BAD_GATEWAY)
                 return
 
+            if path.rstrip("/") == "/downloads":
+                try:
+                    page = max(1, int(parse_qs(parsed.query).get("page", ["1"])[0]))
+                except ValueError:
+                    page = 1
+                self._send_html(library.downloaded_galleries_html(page), extra_headers={"Cache-Control": "no-cache"})
+                return
+            if path.rstrip("/") == "/downloads/random":
+                self._send_html(library.random_downloaded_html(), extra_headers={"Cache-Control": "no-store"})
+                return
+
             media_match = MEDIA_RE.fullmatch(path)
             if media_match:
                 gallery_id, filename = media_match.groups()
@@ -1323,6 +1632,20 @@ def make_library_handler(
                     self._send_text("not found", status=HTTPStatus.NOT_FOUND)
                     return
                 self._send_file(media_path, cache_control="private, max-age=3600")
+                return
+
+            preview_match = PREVIEW_MEDIA_RE.fullmatch(path)
+            if preview_match:
+                gallery_id, page = preview_match.groups()
+                try:
+                    preview_path = library.preview_media_path(gallery_id, page)
+                except Exception as exc:  # noqa: BLE001 - report preview fetch failures to the browser.
+                    self._send_text(f"preview fetch failed: {exc}", status=HTTPStatus.BAD_GATEWAY)
+                    return
+                if preview_path is None:
+                    self._send_text("not found", status=HTTPStatus.NOT_FOUND)
+                    return
+                self._send_file(preview_path, cache_control="private, max-age=3600")
                 return
 
             gallery_match = GALLERY_PAGE_RE.fullmatch(path)
@@ -1396,8 +1719,14 @@ def make_library_handler(
         def _is_allowed(self) -> bool:
             return is_ip_allowed(self.client_address[0], allowed_networks)
 
-        def _send_html(self, payload: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-            self._send_bytes(payload.encode("utf-8"), "text/html; charset=utf-8", status=status)
+        def _send_html(
+            self,
+            payload: str,
+            status: HTTPStatus = HTTPStatus.OK,
+            *,
+            extra_headers: dict[str, str] | None = None,
+        ) -> None:
+            self._send_bytes(payload.encode("utf-8"), "text/html; charset=utf-8", status=status, extra_headers=extra_headers)
 
         def _send_text(self, payload: str, status: HTTPStatus = HTTPStatus.OK) -> None:
             self._send_bytes(payload.encode("utf-8"), "text/plain; charset=utf-8", status=status)
@@ -1486,6 +1815,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--html-cache-max-age", type=int, help="remove HTML cache entries unused for this many seconds")
     parser.add_argument("--html-cache-max-bytes", type=int, help="maximum combined HTML and metadata cache size")
     parser.add_argument("--extract-cache-max-bytes", type=int, help="maximum extracted image cache size")
+    parser.add_argument("--preview-cache-max-age", type=int, help="remove temporary preview files unused for this many seconds")
+    parser.add_argument("--preview-cache-max-bytes", type=int, help="maximum temporary preview cache size")
     parser.add_argument("--cache-sweep-interval", type=int, help="background cache cleanup interval in seconds")
     parser.add_argument(
         "--allowed-network",
@@ -1508,6 +1839,8 @@ def main() -> None:
         "NH_HTML_CACHE_MAX_AGE_SECONDS": args.html_cache_max_age,
         "NH_HTML_CACHE_MAX_BYTES": args.html_cache_max_bytes,
         "NH_EXTRACT_CACHE_MAX_BYTES": args.extract_cache_max_bytes,
+        "NH_PREVIEW_CACHE_MAX_AGE_SECONDS": args.preview_cache_max_age,
+        "NH_PREVIEW_CACHE_MAX_BYTES": args.preview_cache_max_bytes,
         "NH_CACHE_SWEEP_INTERVAL_SECONDS": args.cache_sweep_interval,
     }
     for name, value in cache_args.items():

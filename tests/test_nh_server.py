@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -354,6 +355,16 @@ class StubLibrary(LocalLibrary):
         return UpstreamResponse(source.encode(), "text/html; charset=utf-8", "utf-8", 200, final_path)
 
 
+class PreviewStubLibrary(StubLibrary):
+    def __init__(self, manager, responses, settings=None):
+        super().__init__(manager, responses, settings)
+        self.preview_fetches = []
+
+    def _fetch_cdn_image(self, remote_path: str, page_number: int) -> bytes:
+        self.preview_fetches.append((remote_path, page_number))
+        return f"image-{page_number}".encode()
+
+
 class LocalLibraryTests(unittest.TestCase):
     def small_settings(self, **overrides):
         values = {
@@ -557,6 +568,28 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertFalse(old_dir.exists())
             self.assertTrue(new_dir.exists())
 
+    def test_preview_cache_removes_expired_files_and_enforces_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(
+                manager,
+                {},
+                self.small_settings(preview_max_age_seconds=2, preview_max_bytes=10),
+            )
+            expired = manager.local_preview_dir("111111") / "1.jpg"
+            current = manager.local_preview_dir("222222") / "1.jpg"
+            expired.parent.mkdir(parents=True)
+            current.parent.mkdir(parents=True)
+            expired.write_bytes(b"old")
+            current.write_bytes(b"1234567890")
+            old = time.time() - 10
+            os.utime(expired, (old, old))
+
+            library.cache.cleanup()
+
+            self.assertFalse(expired.exists())
+            self.assertTrue(current.exists())
+
     def test_gallery_html_fetches_and_caches_metadata_on_demand(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
@@ -590,15 +623,91 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertEqual(media_path.read_bytes(), b"image")
             self.assertTrue((manager.local_extract_dir("123456") / ".images.json").exists())
 
-    def test_reader_without_cbz_never_fetches_remote_reader(self):
+    def test_reader_without_cbz_never_fetches_per_page_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
             library = StubLibrary(manager, {"/g/123456/1/": "remote"})
 
             rendered = library.reader_html("123456", "1")
 
-            self.assertIn("not downloaded", rendered)
-            self.assertEqual(library.fetches, [])
+            self.assertIn("Preview unavailable", rendered)
+            self.assertEqual(library.fetches, ["/api/v2/galleries/123456"])
+
+    def test_undownloaded_reader_uses_cached_metadata_and_preview_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+            metadata = {
+                "id": 123456,
+                "pages": [
+                    {"number": 1, "path": "galleries/999/1.webp"},
+                    {"number": 2, "path": "galleries/999/2.webp"},
+                ],
+            }
+            response = UpstreamResponse(json.dumps(metadata).encode(), "application/json", "utf-8", 200, "/api/v2/galleries/123456")
+            library = PreviewStubLibrary(manager, {"/api/v2/galleries/123456": response})
+
+            rendered = library.reader_html("123456", "1")
+            first = library.preview_media_path("123456", "1")
+            second = library.preview_media_path("123456", "1")
+
+            self.assertIn("Temporary preview", rendered)
+            self.assertIn("/preview-media/123456/1", rendered)
+            self.assertIn('rel="preload" as="image" href="/preview-media/123456/2"', rendered)
+            self.assertEqual(first.read_bytes(), b"image-1")
+            self.assertEqual(second, first)
+            self.assertEqual(library.fetches, ["/api/v2/galleries/123456"])
+            self.assertEqual(library.preview_fetches, [("galleries/999/1.webp", 1)])
+            self.assertFalse((storage / "123456.cbz").exists())
+
+    def test_download_catalog_is_newest_first_and_paginated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+            for gallery_id in range(100001, 100028):
+                title = f"Title {gallery_id}"
+                metadata = {"id": gallery_id, "title": {"pretty": title}}
+                source = (
+                    '<meta itemprop="name" content="Title 100027">'
+                    '<meta itemprop="image" content="https://t1.nhentai.net/galleries/999/cover.webp">'
+                    if gallery_id == 100027 else
+                    '<meta itemprop="image" content="//t1.nhentai.net/galleries/999/cover.jpg">'
+                    f'<script>window._gallery = JSON.parse({json.dumps(json.dumps(metadata))});</script>'
+                )
+                archive = storage / f"{gallery_id}.cbz"
+                with zipfile.ZipFile(archive, "w") as zf:
+                    zf.writestr(f"{gallery_id}/cover_page.html", source)
+                os.utime(archive, (gallery_id, gallery_id))
+            library = StubLibrary(manager, {})
+
+            first = library.downloaded_galleries_html(1)
+            second = library.downloaded_galleries_html(2)
+
+            self.assertEqual(first.count('class="gallery"'), 25)
+            self.assertIn("Title 100027", first)
+            self.assertIn("nh-catalog-site-header", first)
+            self.assertNotIn("Title 100001", first)
+            self.assertEqual(second.count('class="gallery"'), 2)
+            self.assertIn("Title 100001", second)
+            self.assertIn("Page 2 / 2", second)
+
+    def test_random_download_catalog_contains_five_unique_galleries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+            for gallery_id in range(200001, 200008):
+                with zipfile.ZipFile(storage / f"{gallery_id}.cbz", "w") as zf:
+                    zf.writestr(f"{gallery_id}/cover_page.html", "<html></html>")
+            library = StubLibrary(manager, {})
+
+            rendered = library.random_downloaded_html()
+            refreshed = library.random_downloaded_html()
+
+            self.assertEqual(rendered.count('class="gallery"'), 5)
+            ids = re.findall(r'href="/g/([0-9]+)/"', rendered)
+            self.assertEqual(len(set(ids)), 5)
+            refreshed_ids = re.findall(r'href="/g/([0-9]+)/"', refreshed)
+            self.assertNotEqual(ids, refreshed_ids)
 
     def test_nested_cbz_is_extracted_without_removing_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -680,6 +789,41 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertTrue(body["galleries"]["123456"]["downloaded"])
             self.assertEqual(asset_response.status, 200)
             self.assertIn(b"/_nh-local/api", asset)
+
+    def test_library_download_catalog_routes_and_random_no_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+            for gallery_id in range(300001, 300008):
+                with zipfile.ZipFile(storage / f"{gallery_id}.cbz", "w") as zf:
+                    zf.writestr(f"{gallery_id}/cover_page.html", "<html></html>")
+            library = StubLibrary(manager, {})
+            handler = make_library_handler(library, parse_networks(["127.0.0.1/32"]))
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                conn = HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+                conn.request("GET", "/downloads/?page=1")
+                downloads = conn.getresponse()
+                downloads_body = downloads.read().decode()
+                conn.close()
+                conn = HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+                conn.request("GET", "/downloads/random/")
+                random_response = conn.getresponse()
+                random_body = random_response.read().decode()
+                conn.close()
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
+            self.assertEqual(downloads.status, 200)
+            self.assertEqual(downloads.getheader("Cache-Control"), "no-cache")
+            self.assertEqual(downloads_body.count('class="gallery"'), 7)
+            self.assertEqual(random_response.status, 200)
+            self.assertEqual(random_response.getheader("Cache-Control"), "no-store")
+            self.assertEqual(random_body.count('class="gallery"'), 5)
 
 
 if __name__ == "__main__":

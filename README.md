@@ -80,6 +80,13 @@ reader: the CBZ is extracted once, a persistent image index avoids rescanning
 the directory on every request, and the next page image is preloaded. Reader
 navigation never fetches per-page HTML from nhentai.
 
+`/downloads/` lists downloaded galleries newest-first with 25 galleries per
+page, and `/downloads/random/` chooses five different downloaded galleries on
+every request. Undownloaded galleries can also be read through the local reader:
+gallery metadata is fetched once and full-size pages are proxied into a
+temporary 24-hour, 2 GiB LRU cache without creating a CBZ or marking the gallery
+as downloaded.
+
 Cached HTML, read-only API responses, metadata, and extracted CBZ files live
 under `~/nh/.nh-local/`. HTML is fresh for 15 minutes, public API JSON is
 fresh for 60 seconds, stale responses are used if upstream is unavailable,
@@ -93,6 +100,8 @@ NH_API_CACHE_TTL_SECONDS
 NH_HTML_CACHE_MAX_AGE_SECONDS
 NH_HTML_CACHE_MAX_BYTES
 NH_EXTRACT_CACHE_MAX_BYTES
+NH_PREVIEW_CACHE_MAX_AGE_SECONDS
+NH_PREVIEW_CACHE_MAX_BYTES
 NH_CACHE_SWEEP_INTERVAL_SECONDS
 ```
 
