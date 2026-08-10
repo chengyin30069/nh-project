@@ -1,10 +1,12 @@
 const GALLERY_PATH_RE = /^\/g\/([0-9]+)\/?$/;
 const URL_CHECK_INTERVAL_MS = 250;
 const RENDER_RETRY_DELAYS_MS = [0, 300, 900, 1800];
+const QUEUE_REFRESH_INTERVAL_MS = 1000;
 
 let currentUrl = "";
 let renderVersion = 0;
 let renderTimers = [];
+let queuePanel = null;
 
 function parseGalleryIdFromUrl(value) {
   try {
@@ -27,6 +29,14 @@ async function getStatuses(ids) {
   return result.body.galleries || {};
 }
 
+async function getQueue() {
+  return browser.runtime.sendMessage({ type: "queue" });
+}
+
+async function deleteGallery(galleryId) {
+  return browser.runtime.sendMessage({ type: "delete", id: galleryId });
+}
+
 async function queueDownload(galleryId, button) {
   button.disabled = true;
   setButtonState(button, "queued", `Queueing "${galleryId}"`);
@@ -34,11 +44,37 @@ async function queueDownload(galleryId, button) {
   try {
     const result = await browser.runtime.sendMessage({ type: "download", id: galleryId });
     setButtonState(button, "done", `Queued "${galleryId}"`, `Queued on ${result.server}`);
+    refreshQueuePanel();
   } catch (error) {
     button.disabled = false;
     setButtonState(button, "error", `Failed "${galleryId}"`, error.message || "Request failed");
     console.error("nh downloader request failed:", error);
   }
+}
+
+function cleanText(value) {
+  return (value || "").replace(/\s+/g, " ").trim();
+}
+
+function getCurrentGalleryTitle(galleryId) {
+  if (parseGalleryIdFromUrl(window.location.href) !== galleryId) {
+    return "";
+  }
+  return cleanText(
+    document.querySelector("#info h1")?.textContent ||
+      document.querySelector(".title .pretty")?.textContent ||
+      document.querySelector("h1")?.textContent ||
+      document.title,
+  );
+}
+
+function getCardTitle(card, overlayTarget) {
+  return cleanText(
+    card?.querySelector(".caption")?.textContent ||
+      overlayTarget?.querySelector("img")?.getAttribute("alt") ||
+      overlayTarget?.getAttribute("title") ||
+      card?.textContent,
+  );
 }
 
 function createDownloadButton(galleryId, className, label) {
@@ -55,12 +91,99 @@ function createDownloadButton(galleryId, className, label) {
   return button;
 }
 
-function createDownloadedMarker(galleryId) {
+function createDeleteButton(galleryId, title) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "nh-delete-button";
+  button.textContent = "Delete";
+  button.title = `Delete "${galleryId}"`;
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    showDeleteModal(galleryId, title);
+  });
+  return button;
+}
+
+function createDownloadedControls(galleryId, title) {
+  const controls = document.createElement("div");
+  controls.className = "nh-downloaded-controls";
+
   const marker = document.createElement("div");
   marker.className = "nh-downloaded-marker";
   marker.textContent = "Downloaded";
   marker.title = `Already downloaded "${galleryId}"`;
-  return marker;
+  controls.append(marker, createDeleteButton(galleryId, title));
+  return controls;
+}
+
+function ensureDeleteModal() {
+  let modal = document.getElementById("nh-delete-modal");
+  if (modal) {
+    return modal;
+  }
+
+  modal = document.createElement("div");
+  modal.id = "nh-delete-modal";
+  modal.className = "nh-delete-modal";
+  modal.innerHTML = `
+    <div class="nh-delete-dialog" role="dialog" aria-modal="true">
+      <h2>Delete downloaded gallery?</h2>
+      <p class="nh-delete-target"></p>
+      <p class="nh-delete-error" hidden></p>
+      <div class="nh-delete-actions">
+        <button type="button" class="nh-delete-cancel">Cancel</button>
+        <button type="button" class="nh-delete-confirm">Delete</button>
+      </div>
+    </div>
+  `;
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      hideDeleteModal();
+    }
+  });
+  modal.querySelector(".nh-delete-cancel").addEventListener("click", hideDeleteModal);
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function hideDeleteModal() {
+  const modal = document.getElementById("nh-delete-modal");
+  if (modal) {
+    modal.remove();
+  }
+}
+
+function showDeleteModal(galleryId, title) {
+  const modal = ensureDeleteModal();
+  const displayTitle = cleanText(title) || getCurrentGalleryTitle(galleryId) || `ID ${galleryId}`;
+  const target = modal.querySelector(".nh-delete-target");
+  const error = modal.querySelector(".nh-delete-error");
+  const confirm = modal.querySelector(".nh-delete-confirm");
+  const cancel = modal.querySelector(".nh-delete-cancel");
+
+  target.textContent = `ID ${galleryId} - ${displayTitle}`;
+  error.hidden = true;
+  error.textContent = "";
+  confirm.disabled = false;
+  cancel.disabled = false;
+
+  confirm.onclick = async () => {
+    confirm.disabled = true;
+    cancel.disabled = true;
+    try {
+      await deleteGallery(galleryId);
+      hideDeleteModal();
+      scheduleRenderForCurrentUrl();
+      refreshQueuePanel();
+    } catch (deleteError) {
+      error.textContent = deleteError.message || "Delete failed";
+      error.hidden = false;
+      confirm.disabled = false;
+      cancel.disabled = false;
+      console.error("nh downloader delete failed:", deleteError);
+    }
+  };
 }
 
 function findNativeDownloadTarget() {
@@ -107,6 +230,9 @@ async function addGalleryPageButton(version) {
     if (statuses[galleryId]?.downloaded) {
       button.disabled = true;
       setButtonState(button, "downloaded", "Downloaded", `Already downloaded "${galleryId}"`);
+      if (!button.parentElement?.querySelector(".nh-delete-button")) {
+        button.insertAdjacentElement("afterend", createDeleteButton(galleryId, getCurrentGalleryTitle(galleryId)));
+      }
     }
   } catch (error) {
     console.error("nh downloader page status check failed:", error);
@@ -164,15 +290,15 @@ async function renderThumbnailControls(version) {
 
     if (statuses[galleryId]?.downloaded) {
       overlayTarget.querySelector(".nh-thumb-download-button")?.remove();
-      if (!overlayTarget.querySelector(".nh-downloaded-marker")) {
-        overlayTarget.appendChild(createDownloadedMarker(galleryId));
+      if (!overlayTarget.querySelector(".nh-downloaded-controls")) {
+        overlayTarget.appendChild(createDownloadedControls(galleryId, getCardTitle(card, overlayTarget) || `ID ${galleryId}`));
       }
       continue;
     }
 
     if (
       !overlayTarget.querySelector(".nh-thumb-download-button") &&
-      !overlayTarget.querySelector(".nh-downloaded-marker")
+      !overlayTarget.querySelector(".nh-downloaded-controls")
     ) {
       overlayTarget.appendChild(createDownloadButton(galleryId, "nh-thumb-download-button", "DL"));
     }
@@ -181,7 +307,9 @@ async function renderThumbnailControls(version) {
 
 function cleanupPluginUi() {
   document.querySelectorAll("#nh-downloader-button").forEach((element) => element.remove());
-  document.querySelectorAll(".nh-thumb-download-button, .nh-downloaded-marker").forEach((element) => element.remove());
+  document
+    .querySelectorAll(".nh-thumb-download-button, .nh-downloaded-controls, .nh-delete-button")
+    .forEach((element) => element.remove());
   document.querySelectorAll(".nh-downloader-card").forEach((element) => {
     element.classList.remove("nh-downloader-card");
   });
@@ -189,6 +317,77 @@ function cleanupPluginUi() {
     element.classList.remove("nh-downloader-overlay-target");
     delete element.dataset.nhGalleryId;
   });
+}
+
+function formatQueueItem(job) {
+  const label = job.id || job.gallery_id || "unknown";
+  return `${label} · ${job.status || "queued"}`;
+}
+
+function renderQueuePanel(result) {
+  if (!queuePanel) {
+    return;
+  }
+
+  const body = result?.body || {};
+  queuePanel.querySelector(".nh-queue-server").textContent = result?.server || "";
+
+  const running = body.running || [];
+  const queued = body.queued || [];
+  const recent = (body.recent || []).slice(0, 5);
+  const lines = [];
+
+  if (running.length) {
+    lines.push(`Running: ${running.map(formatQueueItem).join(", ")}`);
+  }
+  if (queued.length) {
+    lines.push(`Queued: ${queued.map(formatQueueItem).join(", ")}`);
+  }
+  if (recent.length) {
+    lines.push(`Recent: ${recent.map(formatQueueItem).join(", ")}`);
+  }
+
+  queuePanel.querySelector(".nh-queue-body").textContent = lines.join("\n") || "Queue is empty";
+  queuePanel.dataset.state = "ok";
+}
+
+function renderQueueError(error) {
+  if (!queuePanel) {
+    return;
+  }
+  queuePanel.dataset.state = "error";
+  queuePanel.querySelector(".nh-queue-server").textContent = "";
+  queuePanel.querySelector(".nh-queue-body").textContent = error.message || "Queue unavailable";
+}
+
+async function refreshQueuePanel() {
+  if (!queuePanel) {
+    return;
+  }
+  try {
+    renderQueuePanel(await getQueue());
+  } catch (error) {
+    renderQueueError(error);
+  }
+}
+
+function ensureQueuePanel() {
+  if (queuePanel) {
+    return;
+  }
+
+  queuePanel = document.createElement("div");
+  queuePanel.id = "nh-queue-panel";
+  queuePanel.innerHTML = `
+    <div class="nh-queue-header">
+      <span>Download Queue</span>
+      <span class="nh-queue-server"></span>
+    </div>
+    <pre class="nh-queue-body">Loading...</pre>
+  `;
+  document.body.appendChild(queuePanel);
+  refreshQueuePanel();
+  window.setInterval(refreshQueuePanel, QUEUE_REFRESH_INTERVAL_MS);
 }
 
 function renderCurrentPage(version) {
@@ -225,6 +424,7 @@ function detectUrlChange() {
   scheduleRenderForCurrentUrl();
 }
 
+ensureQueuePanel();
 detectUrlChange();
 window.setInterval(detectUrlChange, URL_CHECK_INTERVAL_MS);
 window.addEventListener("pageshow", () => {

@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -11,8 +12,10 @@ from pathlib import Path
 from server.nh_server import (
     DownloadManager,
     DEFAULT_ALLOWED_NETWORKS,
+    LocalLibrary,
     is_ip_allowed,
     is_valid_gallery_id,
+    make_library_handler,
     make_handler,
     parse_networks,
 )
@@ -169,6 +172,36 @@ class DownloadManagerTests(unittest.TestCase):
                 ["start:111111", "end:111111", "start:222222", "end:222222"],
             )
 
+    def test_queue_snapshot_tracks_running_queued_and_recent_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = root / "nh"
+            stub = self.make_stub(root, 'sleep 0.25; echo "page" > "$NH_FOLDER_PATH/$1/1.txt"')
+            manager = DownloadManager(
+                project_root=root,
+                storage_dir=storage,
+                env={**os.environ, "NH_FOLDER_PATH": str(storage)},
+                downloader_command=[str(stub)],
+            )
+
+            first, _ = manager.submit("111111")
+            second, _ = manager.submit("222222")
+            deadline = time.time() + 2
+            snapshot = {}
+            while time.time() < deadline:
+                snapshot = manager.queue_snapshot()
+                if snapshot["running"] and snapshot["queued"]:
+                    break
+                time.sleep(0.02)
+
+            self.assertEqual(snapshot["running"][0]["id"], "111111")
+            self.assertEqual(snapshot["queued"][0]["id"], "222222")
+            self.wait_for_job(manager, first.job_id)
+            self.wait_for_job(manager, second.job_id)
+            recent_ids = [job["id"] for job in manager.queue_snapshot()["recent"]]
+            self.assertIn("111111", recent_ids)
+            self.assertIn("222222", recent_ids)
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -246,6 +279,132 @@ class ApiTests(unittest.TestCase):
         status, data = self.request("POST", "/api/galleries/status", {"ids": ["123456", "../bad"]})
         self.assertEqual(status, 400)
         self.assertIn("error", data)
+
+    def test_queue_endpoint_returns_snapshot(self):
+        self.manager.submit("123456")
+
+        status, data = self.request("GET", "/api/queue")
+
+        self.assertEqual(status, 200)
+        self.assertIn("running", data)
+        self.assertIn("queued", data)
+        self.assertIn("recent", data)
+        self.assertIn("counts", data)
+
+    def test_delete_gallery_removes_archive_and_local_cache(self):
+        self.storage.mkdir(parents=True)
+        (self.storage / "123456.cbz").write_bytes(b"ready")
+        cache_file = self.storage / ".nh-local" / "html" / "123456" / "cover_page.html"
+        cache_file.parent.mkdir(parents=True)
+        cache_file.write_text("cached", encoding="utf-8")
+        metadata_file = self.storage / ".nh-local" / "metadata" / "123456.json"
+        metadata_file.parent.mkdir(parents=True)
+        metadata_file.write_text("{}", encoding="utf-8")
+        extract_file = self.storage / ".nh-local" / "extract" / "123456" / "1.jpg"
+        extract_file.parent.mkdir(parents=True)
+        extract_file.write_bytes(b"image")
+
+        status, data = self.request("DELETE", "/api/galleries/123456")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["deleted"])
+        self.assertFalse((self.storage / "123456.cbz").exists())
+        self.assertFalse(cache_file.exists())
+        self.assertFalse(metadata_file.exists())
+        self.assertFalse(extract_file.exists())
+
+    def test_delete_gallery_rejects_invalid_id(self):
+        status, data = self.request("DELETE", "/api/galleries/../bad")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+
+class StubLibrary(LocalLibrary):
+    def __init__(self, manager, responses):
+        super().__init__(manager)
+        self.responses = responses
+
+    def _fetch_nhentai_html(self, path_with_query: str) -> str:
+        if path_with_query not in self.responses:
+            raise RuntimeError(f"unexpected fetch: {path_with_query}")
+        return self.responses[path_with_query]
+
+
+class LocalLibraryTests(unittest.TestCase):
+    def test_rewrite_links_preserves_cdn_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = LocalLibrary(manager)
+
+            html = (
+                "<html><head></head><body>"
+                '<a href="/g/123456/">gallery</a>'
+                '<a href="https://nhentai.net/artist/example/">artist</a>'
+                '<img src="https://t1.nhentai.net/galleries/999/cover.jpg">'
+                "</body></html>"
+            )
+
+            rewritten = library.rewrite_html(html)
+
+            self.assertIn('href="/g/123456/"', rewritten)
+            self.assertIn('href="/artist/example/"', rewritten)
+            self.assertIn('src="https://t1.nhentai.net/galleries/999/cover.jpg"', rewritten)
+            self.assertIn("data-nh-local-navigation", rewritten)
+
+    def test_gallery_html_fetches_and_caches_metadata_on_demand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            metadata = {"id": 123456, "title": {"pretty": "Cached Title"}}
+            source = f"<script>window._gallery = JSON.parse({json.dumps(json.dumps(metadata))});</script>"
+            library = StubLibrary(manager, {"/g/123456/": source})
+
+            rendered = library.gallery_html("123456")
+
+            self.assertIn("window._gallery", rendered)
+            cached = json.loads(manager.local_metadata_path("123456").read_text(encoding="utf-8"))
+            self.assertEqual(cached["title"]["pretty"], "Cached Title")
+            self.assertTrue((manager.local_html_dir("123456") / "cover_page.html").exists())
+
+    def test_reader_uses_local_cbz_image_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+            with zipfile.ZipFile(storage / "123456.cbz", "w") as zf:
+                zf.writestr("1.jpg", b"image")
+            library = StubLibrary(manager, {})
+
+            rendered = library.reader_html("123456", "1")
+            media_path = library.media_path("123456", "1.jpg")
+
+            self.assertIn("/media/123456/1.jpg", rendered)
+            self.assertIsNotNone(media_path)
+            self.assertEqual(media_path.read_bytes(), b"image")
+
+    def test_library_media_route_serves_extracted_cbz_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+            with zipfile.ZipFile(storage / "123456.cbz", "w") as zf:
+                zf.writestr("1.jpg", b"image")
+            library = StubLibrary(manager, {})
+            handler = make_library_handler(library, parse_networks(["127.0.0.1/32"]))
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+
+            try:
+                conn = HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+                conn.request("GET", "/media/123456/1.jpg")
+                response = conn.getresponse()
+                body = response.read()
+                conn.close()
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
+            self.assertEqual(response.status, 200)
+            self.assertEqual(body, b"image")
 
 
 if __name__ == "__main__":

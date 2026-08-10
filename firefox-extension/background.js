@@ -32,6 +32,28 @@ async function requestStatuses(server, ids) {
   return { server, body };
 }
 
+async function requestQueue(server) {
+  const response = await fetch(`${server}/api/queue`);
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  return { server, body };
+}
+
+async function requestDelete(server, id) {
+  const response = await fetch(`${server}/api/galleries/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  return { server, body };
+}
+
 async function tryServers(callback) {
   let lastError = null;
   for (const server of SERVERS) {
@@ -50,6 +72,12 @@ browser.runtime.onMessage.addListener((message) => {
   }
   if (message.type === "statuses") {
     return tryServers((server) => requestStatuses(server, message.ids));
+  }
+  if (message.type === "queue") {
+    return tryServers((server) => requestQueue(server));
+  }
+  if (message.type === "delete") {
+    return tryServers((server) => requestDelete(server, message.id));
   }
   return false;
 });

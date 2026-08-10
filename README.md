@@ -33,7 +33,8 @@ chmod 600 cookie.sh
 
 The server listens on port `8765`, accepts requests only from
 `192.168.50.0/24`, `192.168.193.0/24`, and localhost, then queues downloads in
-the background.
+the background. It also starts a local browsing server on port `8766` by
+default.
 
 ```bash
 python3 server/nh_server.py
@@ -50,6 +51,30 @@ curl -X POST http://127.0.0.1:8765/api/download \
 The downloader stores the final archive at `~/nh/123456.cbz`. The raw
 `~/nh/123456/` folder is removed only after the archive is created successfully.
 
+Inspect the current queue:
+
+```bash
+curl http://127.0.0.1:8765/api/queue
+```
+
+Delete a downloaded gallery and its local browsing cache:
+
+```bash
+curl -X DELETE http://127.0.0.1:8765/api/galleries/123456
+```
+
+The local browsing server is available at:
+
+```text
+http://127.0.0.1:8766/
+```
+
+It rewrites nhentai HTML links to local links, keeps thumbnails/CDN images
+remote, and serves reader images from local `{id}.cbz` archives when available.
+Cached HTML, metadata, and extracted CBZ files live under `~/nh/.nh-local/`.
+For old `.cbz` files without cached metadata, the server fetches the gallery
+HTML on first access and stores it there.
+
 To install the systemd service:
 
 ```bash
@@ -63,7 +88,10 @@ sudo systemctl enable --now nh-downloader.service
 Load `firefox-extension/` temporarily from `about:debugging`. On
 `https://nhentai.net/g/<id>/`, the extension injects a lower-right button that
 queues the current gallery through `192.168.50.144:8765`, falling back to
-`192.168.193.144:8765`. The server list can be changed in the extension options.
+`192.168.193.144:8765`. It also shows the current download queue on nhentai
+pages and refreshes it once per second. Downloaded galleries get a delete
+button; deletion opens an in-page confirmation dialog showing the gallery ID and
+title before calling the local server.
 
 # Using Docker
 For Windows users or who just want to use docker, simply build with Dockerfile we provided 

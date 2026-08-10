@@ -1,11 +1,26 @@
 {
   "manifest_version": 2,
   "name": "Nh Downloader Button",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Queue the current nhentai gallery on your LAN downloader.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "nh-downloader@linus.local",
+      "data_collection_permissions": {
+        "required": [
+          "browsingActivity",
+          "websiteActivity"
+        ]
+      }
+    }
+  },
   "permissions": [
     "http://192.168.50.144:8765/*",
-    "http://192.168.193.144:8765/*"
+    "http://192.168.50.144:8766/*",
+    "http://192.168.193.144:8765/*",
+    "http://192.168.193.144:8766/*",
+    "http://100.109.167.26:8765/*",
+	"http://100.109.167.26:8766/*"
   ],
   "background": {
     "scripts": ["background.js"]
