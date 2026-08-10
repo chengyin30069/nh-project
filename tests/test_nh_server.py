@@ -10,8 +10,10 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from server.nh_server import (
+    CacheSettings,
     DownloadManager,
     DEFAULT_ALLOWED_NETWORKS,
+    LOCAL_UI_CSS,
     LocalLibrary,
     is_ip_allowed,
     is_valid_gallery_id,
@@ -33,6 +35,8 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(is_ip_allowed("192.168.50.144", networks))
         self.assertTrue(is_ip_allowed("192.168.193.144", networks))
         self.assertTrue(is_ip_allowed("127.0.0.1", networks))
+        self.assertTrue(is_ip_allowed("100.109.167.26", networks))
+        self.assertFalse(is_ip_allowed("100.1.2.3", networks))
         self.assertFalse(is_ip_allowed("192.168.51.144", networks))
 
 
@@ -235,10 +239,11 @@ class ApiTests(unittest.TestCase):
         self.thread.join(timeout=2)
         self.tmp.cleanup()
 
-    def request(self, method, path, body=None):
+    def request(self, method, path, body=None, extra_headers=None):
         conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
         payload = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"} if payload else {}
+        headers.update(extra_headers or {})
         conn.request(method, path, body=payload, headers=headers)
         response = conn.getresponse()
         data = json.loads(response.read().decode("utf-8"))
@@ -318,19 +323,40 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", data)
 
+    def test_browser_origin_is_rejected_but_extension_origin_is_allowed(self):
+        status, _ = self.request("GET", "/health", extra_headers={"Origin": "https://evil.example"})
+        self.assertEqual(status, 403)
+
+        status, data = self.request("GET", "/health", extra_headers={"Origin": "moz-extension://test"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+
 
 class StubLibrary(LocalLibrary):
-    def __init__(self, manager, responses):
-        super().__init__(manager)
+    def __init__(self, manager, responses, cache_settings=None):
+        super().__init__(manager, cache_settings=cache_settings, cache_autostart=False)
         self.responses = responses
+        self.fetches = []
 
     def _fetch_nhentai_html(self, path_with_query: str) -> str:
+        self.fetches.append(path_with_query)
         if path_with_query not in self.responses:
             raise RuntimeError(f"unexpected fetch: {path_with_query}")
         return self.responses[path_with_query]
 
 
 class LocalLibraryTests(unittest.TestCase):
+    def small_settings(self, **overrides):
+        values = {
+            "html_ttl_seconds": 60,
+            "html_max_age_seconds": 100,
+            "html_max_bytes": 10_000,
+            "extract_max_bytes": 10_000,
+            "sweep_interval_seconds": 100,
+        }
+        values.update(overrides)
+        return CacheSettings(**values)
+
     def test_rewrite_links_preserves_cdn_images(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
@@ -350,6 +376,93 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertIn('href="/artist/example/"', rewritten)
             self.assertIn('src="https://t1.nhentai.net/galleries/999/cover.jpg"', rewritten)
             self.assertIn("data-nh-local-navigation", rewritten)
+            self.assertIn("/_nh-local/assets/local.js", rewritten)
+
+    def test_rewrite_removes_tracking_script_and_iframe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = LocalLibrary(manager, cache_autostart=False)
+            source = (
+                '<html><head><meta http-equiv="delegate-ch" content="https://tsyndicate.com">'
+                '<script src="https://static.cloudflareinsights.com/beacon.js"></script></head>'
+                '<body><iframe src="https://ads.example"></iframe>'
+                '<a href="//tsyndicate.com/ad">Ad</a>'
+                '<li class="menu-sign-in"><a href="/login/">Login</a></li></body></html>'
+            )
+
+            rendered = library.rewrite_html(source)
+
+            self.assertNotIn("cloudflareinsights", rendered)
+            self.assertNotIn("tsyndicate", rendered)
+            self.assertNotIn("<iframe", rendered)
+            self.assertNotIn('href="/login/"', rendered)
+            self.assertIn('a[href^="/login"]', LOCAL_UI_CSS)
+
+    def test_fresh_html_cache_avoids_second_upstream_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(manager, {"/": "<html><head></head><body>home</body></html>"})
+
+            library.proxy_html("/")
+            library.proxy_html("/")
+
+            self.assertEqual(library.fetches, ["/"])
+
+    def test_expired_html_uses_stale_copy_when_refresh_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            settings = CacheSettings(html_ttl_seconds=1, html_max_age_seconds=100, html_max_bytes=10000, extract_max_bytes=10000, sweep_interval_seconds=100)
+            library = StubLibrary(manager, {"/": "<html><head></head><body>home</body></html>"}, settings)
+            library.proxy_html("/")
+            cache_path = library.cache.proxy_path("/")
+            old = time.time() - 5
+            os.utime(cache_path, (old, old))
+            library.responses.clear()
+
+            rendered = library.proxy_html("/")
+
+            self.assertIn("showing cached content", rendered)
+
+    def test_non_public_account_route_is_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(manager, {})
+
+            with self.assertRaises(PermissionError):
+                library.proxy_html("/login/")
+
+    def test_html_cache_enforces_size_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(manager, {}, self.small_settings(html_max_bytes=20))
+            first = manager.local_cache_root() / "proxy" / "first.html"
+            second = manager.local_cache_root() / "proxy" / "second.html"
+
+            library.cache.write_html(first, "a" * 15)
+            time.sleep(0.01)
+            library.cache.write_html(second, "b" * 15)
+
+            files = list((manager.local_cache_root() / "proxy").glob("*.html"))
+            self.assertLessEqual(sum(path.stat().st_size for path in files), 20)
+            self.assertTrue(second.exists())
+
+    def test_extract_cache_evicts_oldest_complete_gallery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(manager, {}, self.small_settings(extract_max_bytes=12))
+            old_dir = manager.local_extract_dir("111111")
+            new_dir = manager.local_extract_dir("222222")
+            for directory in (old_dir, new_dir):
+                directory.mkdir(parents=True)
+                (directory / "1.jpg").write_bytes(b"1234567890")
+                (directory / ".complete").write_text("ok")
+            old = time.time() - 10
+            os.utime(old_dir / ".complete", (old, old))
+
+            library.cache.cleanup()
+
+            self.assertFalse(old_dir.exists())
+            self.assertTrue(new_dir.exists())
 
     def test_gallery_html_fetches_and_caches_metadata_on_demand(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -380,6 +493,33 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertIsNotNone(media_path)
             self.assertEqual(media_path.read_bytes(), b"image")
 
+    def test_reader_without_cbz_never_fetches_remote_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(manager, {"/g/123456/1/": "remote"})
+
+            rendered = library.reader_html("123456", "1")
+
+            self.assertIn("not downloaded", rendered)
+            self.assertEqual(library.fetches, [])
+
+    def test_nested_cbz_is_extracted_without_removing_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            archive = storage / "123456.cbz"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("123456/1.jpg", b"one")
+                zf.writestr("../escape.jpg", b"escape")
+                zf.writestr("123456/readme.txt", b"ignored")
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+            library = StubLibrary(manager, {})
+
+            image = library.page_image_path("123456", "1")
+
+            self.assertEqual(image.read_bytes(), b"one")
+            self.assertTrue(archive.exists())
+            self.assertFalse((storage / ".nh-local" / "extract" / "escape.jpg").exists())
+
     def test_library_media_route_serves_extracted_cbz_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp)
@@ -405,6 +545,43 @@ class LocalLibraryTests(unittest.TestCase):
 
             self.assertEqual(response.status, 200)
             self.assertEqual(body, b"image")
+
+    def test_library_same_origin_status_api_and_local_asset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            (storage / "123456.cbz").write_bytes(b"ready")
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+            library = StubLibrary(manager, {})
+            handler = make_library_handler(library, parse_networks(["127.0.0.1/32"]))
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                conn = HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+                payload = json.dumps({"ids": ["123456", "654321"]}).encode()
+                conn.request(
+                    "POST",
+                    "/_nh-local/api/galleries/status",
+                    body=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                response = conn.getresponse()
+                body = json.loads(response.read())
+                conn.close()
+                conn = HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+                conn.request("GET", "/_nh-local/assets/local.js")
+                asset_response = conn.getresponse()
+                asset = asset_response.read()
+                conn.close()
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
+            self.assertEqual(response.status, 200)
+            self.assertTrue(body["galleries"]["123456"]["downloaded"])
+            self.assertEqual(asset_response.status, 200)
+            self.assertIn(b"/_nh-local/api", asset)
 
 
 if __name__ == "__main__":

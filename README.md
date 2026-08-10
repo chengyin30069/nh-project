@@ -69,11 +69,33 @@ The local browsing server is available at:
 http://127.0.0.1:8766/
 ```
 
-It rewrites nhentai HTML links to local links, keeps thumbnails/CDN images
-remote, and serves reader images from local `{id}.cbz` archives when available.
+It mirrors nhentai's public home, search, taxonomy, gallery, reader, random,
+info, and community pages while keeping navigation on the local server. Ads,
+tracking, popups, and account-only routes are removed. Gallery cards and detail
+pages get local download status plus download/delete controls. Thumbnails keep
+their original CDN URLs; full reader images are served only from local
+`{id}.cbz` archives. An undownloaded reader page shows a download prompt instead
+of loading remote full-size images.
+
 Cached HTML, metadata, and extracted CBZ files live under `~/nh/.nh-local/`.
-For old `.cbz` files without cached metadata, the server fetches the gallery
-HTML on first access and stores it there.
+HTML is fresh for 15 minutes, stale pages are used if upstream is unavailable,
+and entries unused for seven days are removed. HTML/metadata are capped at
+512 MiB and extracted images use a 5 GiB LRU cache. The original CBZ is never
+removed by extraction or cache cleanup. The limits can be changed with:
+
+```text
+NH_HTML_CACHE_TTL_SECONDS
+NH_HTML_CACHE_MAX_AGE_SECONDS
+NH_HTML_CACHE_MAX_BYTES
+NH_EXTRACT_CACHE_MAX_BYTES
+NH_CACHE_SWEEP_INTERVAL_SECONDS
+```
+
+Equivalent command-line flags are shown by `python3 server/nh_server.py --help`.
+The library UI uses same-origin endpoints under `/_nh-local/api/`; the existing
+port 8765 API remains available to the Firefox extension and command-line
+clients. Browser origins other than Firefox extension origins are rejected on
+port 8765.
 
 To install the systemd service:
 

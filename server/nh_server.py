@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import ipaddress
 import json
@@ -33,13 +34,17 @@ DEFAULT_ALLOWED_NETWORKS = (
     "192.168.193.0/24",
     "127.0.0.1/32",
     "::1/128",
-    "100.0.0.0/8",
+    "100.64.0.0/10",
 )
 TERMINAL_STATUSES = {"succeeded", "failed"}
 GALLERY_ID_RE = re.compile(r"^[0-9]+$")
 GALLERY_PAGE_RE = re.compile(r"^/g/([0-9]+)/?$")
 GALLERY_READER_RE = re.compile(r"^/g/([0-9]+)/([0-9]+)/?$")
 MEDIA_RE = re.compile(r"^/media/([0-9]+)/([^/]+)$")
+LOCAL_API_PREFIX = "/_nh-local/api"
+LOCAL_ASSET_PREFIX = "/_nh-local/assets"
+MAX_JSON_BODY_BYTES = 64 * 1024
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 WINDOW_GALLERY_RE = re.compile(r"window\._gallery\s*=\s*JSON\.parse\((?P<value>\"(?:\\.|[^\"\\])*\")\)")
 INTERNAL_HREF_RE = re.compile(r'(?P<prefix>\s(?:href|action)=["\'])(?P<url>/(?!/)[^"\']*)(?P<suffix>["\'])', re.IGNORECASE)
 ABS_NHENTAI_HREF_RE = re.compile(
@@ -90,6 +95,45 @@ LOCAL_NAVIGATION_SCRIPT = """<script>
   }, true);
 }());
 </script>"""
+
+LOCAL_UI_CSS = r"""
+.nh-local-overlay-target{position:relative!important;isolation:isolate!important}
+.nh-local-card-controls{position:absolute!important;z-index:40!important;top:6px!important;right:6px!important;display:flex;gap:5px;align-items:center}
+.nh-local-btn,.nh-local-badge{box-sizing:border-box;min-height:25px;border:0;border-radius:5px;padding:0 8px;color:#fff!important;font:700 12px/25px system-ui,sans-serif;box-shadow:0 2px 8px #0008;text-decoration:none!important}
+.nh-local-btn{background:#ed2553!important;cursor:pointer}.nh-local-btn:hover{background:#ff4774!important}.nh-local-btn:disabled{cursor:default;opacity:.75}
+.nh-local-delete{background:#9f3030!important}.nh-local-delete:hover{background:#c43d3d!important}.nh-local-badge{background:#238847!important;pointer-events:none}
+.nh-local-detail-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0}.nh-local-detail-controls .nh-local-btn{font-size:14px;min-height:36px;line-height:36px;padding:0 14px}
+.nh-local-error{color:#ff9c9c;font:13px/1.4 system-ui,sans-serif}
+.nh-local-stale{position:sticky;top:0;z-index:2147483645;padding:7px 12px;background:#8a5a00;color:#fff;text-align:center;font:600 13px/1.3 system-ui,sans-serif}
+.nh-local-modal{position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;padding:18px;background:#000a}
+.nh-local-dialog{width:min(440px,100%);border-radius:8px;padding:18px;background:#202327;color:#f6f7f8;box-shadow:0 18px 46px #000b;font:14px/1.45 system-ui,sans-serif}
+.nh-local-dialog h2{margin:0 0 10px;font-size:18px}.nh-local-dialog p{overflow-wrap:anywhere}.nh-local-actions{display:flex;justify-content:flex-end;gap:8px}.nh-local-actions button{min-height:34px;border:0;border-radius:4px;padding:0 12px;color:#fff;font-weight:700;cursor:pointer}.nh-local-cancel{background:#555d66}.nh-local-confirm{background:#b73535}
+a[href^="/login"],a[href^="/register"],a[href^="/favorites"],a[href^="/upload"]{display:none!important}
+iframe,.advertisement,.adsbyexoclick,.ad-container{display:none!important}
+"""
+
+LOCAL_UI_JS = r"""
+(function(){
+  "use strict";
+  var API="/_nh-local/api";
+  function idFrom(value){try{return new URL(value,location.href).pathname.match(/^\/g\/(\d+)\/?$/)?.[1]||null}catch(_){return null}}
+  function clean(value){return(value||"").replace(/\s+/g," ").trim()}
+  async function request(path,options){var response=await fetch(API+path,options);var body=await response.json().catch(function(){return{}});if(!response.ok)throw new Error(body.error||("HTTP "+response.status));return body}
+  function button(label,kind){var item=document.createElement("button");item.type="button";item.className="nh-local-btn "+(kind||"");item.textContent=label;return item}
+  function titleFor(card,id){return clean(card?.querySelector(".caption")?.textContent||card?.querySelector("img")?.alt||document.querySelector("#info h1")?.textContent)||("ID "+id)}
+  function modal(id,title,onDone){var shade=document.createElement("div");shade.className="nh-local-modal";shade.innerHTML='<div class="nh-local-dialog" role="dialog" aria-modal="true"><h2>Delete downloaded gallery?</h2><p></p><div class="nh-local-error" hidden></div><div class="nh-local-actions"><button class="nh-local-cancel">Cancel</button><button class="nh-local-confirm">Delete</button></div></div>';shade.querySelector("p").textContent="ID "+id+" — "+title;var close=function(){shade.remove()};shade.querySelector(".nh-local-cancel").onclick=close;shade.onclick=function(e){if(e.target===shade)close()};shade.querySelector(".nh-local-confirm").onclick=async function(){var controls=shade.querySelectorAll("button");controls.forEach(function(x){x.disabled=true});try{await request("/galleries/"+id,{method:"DELETE"});close();onDone()}catch(error){var box=shade.querySelector(".nh-local-error");box.hidden=false;box.textContent=error.message;controls.forEach(function(x){x.disabled=false})}};document.body.appendChild(shade)}
+  async function startDownload(id,control,refresh){control.disabled=true;control.textContent="Queued";try{var job=await request("/download",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id})});while(job.status==="queued"||job.status==="running"){control.textContent=job.status==="running"?"Running":"Queued";await new Promise(function(resolve){setTimeout(resolve,1000)});job=await request("/jobs/"+job.job_id)}if(job.status!=="succeeded")throw new Error(job.error||"Download failed");refresh()}catch(error){control.disabled=false;control.textContent="Retry";control.title=error.message}}
+  function render(target,id,status,title,detail){target.replaceChildren();if(status.downloaded){delete target.dataset.watch;var badge=document.createElement("span");badge.className="nh-local-badge";badge.textContent="Downloaded";var del=button("Delete","nh-local-delete");del.onclick=function(e){e.preventDefault();e.stopPropagation();modal(id,title,function(){render(target,id,{downloaded:false},title,detail)})};target.append(badge,del);return}var dl=button(detail?"Download":"DL");if(status.status==="queued"||status.status==="running"){dl.textContent=status.status==="running"?"Running":"Queued";dl.disabled=true;if(status.job_id&&target.dataset.watch!==status.job_id){target.dataset.watch=status.job_id;(async function(){try{var job=status;while(job.status==="queued"||job.status==="running"){await new Promise(function(resolve){setTimeout(resolve,1000)});job=await request("/jobs/"+status.job_id);dl.textContent=job.status==="running"?"Running":"Queued"}render(target,id,{downloaded:job.status==="succeeded",status:job.status,error:job.error},title,detail)}catch(error){dl.disabled=false;dl.textContent="Retry";dl.title=error.message}})()}}else if(status.status==="failed"){dl.textContent="Retry";dl.title=status.error||"Download failed"}dl.onclick=function(e){e.preventDefault();e.stopPropagation();startDownload(id,dl,function(){render(target,id,{downloaded:true},title,detail)})};target.appendChild(dl)}
+  async function boot(){
+    document.querySelectorAll("iframe,.advertisement,.adsbyexoclick,.ad-container").forEach(function(x){x.remove()});
+    var cards=new Map();document.querySelectorAll('a[href*="/g/"]').forEach(function(link){var id=idFrom(link.href);if(!id||cards.has(id))return;var card=link.closest(".gallery")||link.closest(".thumb-container");if(!card)return;var cover=link.querySelector("img")?link:card;cover.classList.add("nh-local-overlay-target");var holder=document.createElement("span");holder.className="nh-local-card-controls";cover.appendChild(holder);cards.set(id,{holder:holder,title:titleFor(card,id)})});
+    var detailId=location.pathname.match(/^\/g\/(\d+)\/?$/)?.[1];var detail=null;if(detailId){detail=document.createElement("div");detail.className="nh-local-detail-controls";var anchor=document.querySelector("#info")||document.querySelector("main")||document.body;anchor.appendChild(detail)}
+    var ids=Array.from(cards.keys());if(detailId&&!ids.includes(detailId))ids.push(detailId);if(!ids.length)return;
+    try{var result=await request("/galleries/status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:ids})});cards.forEach(function(value,id){render(value.holder,id,result.galleries[id]||{},value.title,false)});if(detail)render(detail,detailId,result.galleries[detailId]||{},titleFor(null,detailId),true)}catch(error){if(detail){detail.textContent="Local status unavailable: "+error.message;detail.classList.add("nh-local-error")}}
+  }
+  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",boot);else boot();
+}());
+"""
 
 
 def is_valid_gallery_id(value: object) -> bool:
@@ -190,6 +234,7 @@ class DownloadManager:
 
         self.jobs: dict[str, Job] = {}
         self.active_by_gallery_id: dict[str, str] = {}
+        self.gallery_locks: dict[str, threading.Lock] = {}
         self.queued_job_ids: deque[str] = deque()
         self.recent_job_ids: deque[str] = deque(maxlen=30)
         self.lock = threading.RLock()
@@ -248,6 +293,7 @@ class DownloadManager:
                 "downloaded": self.archive_path(gallery_id).exists(),
                 "job_id": job.job_id if job else None,
                 "status": job.status if job else None,
+                "error": job.error if job else None,
             }
 
     def galleries_status(self, gallery_ids: Iterable[str]) -> dict[str, dict[str, object]]:
@@ -294,19 +340,20 @@ class DownloadManager:
                 }
 
         deleted_paths: list[str] = []
-        for path in (
-            self.archive_path(gallery_id),
-            self.folder_path(gallery_id),
-            self.local_html_dir(gallery_id),
-            self.local_metadata_path(gallery_id),
-            self.local_extract_dir(gallery_id),
-        ):
-            if path.is_dir():
-                shutil.rmtree(path)
-                deleted_paths.append(str(path))
-            elif path.exists():
-                path.unlink()
-                deleted_paths.append(str(path))
+        with self.gallery_lock(gallery_id):
+            for path in (
+                self.archive_path(gallery_id),
+                self.folder_path(gallery_id),
+                self.local_html_dir(gallery_id),
+                self.local_metadata_path(gallery_id),
+                self.local_extract_dir(gallery_id),
+            ):
+                if path.is_dir():
+                    shutil.rmtree(path)
+                    deleted_paths.append(str(path))
+                elif path.exists():
+                    path.unlink()
+                    deleted_paths.append(str(path))
 
         with self.lock:
             if self.active_by_gallery_id.get(gallery_id) == job_id:
@@ -336,6 +383,10 @@ class DownloadManager:
 
     def local_extract_dir(self, gallery_id: str) -> Path:
         return self.local_cache_root() / "extract" / gallery_id
+
+    def gallery_lock(self, gallery_id: str) -> threading.Lock:
+        with self.lock:
+            return self.gallery_locks.setdefault(gallery_id, threading.Lock())
 
     def _worker_loop(self) -> None:
         while True:
@@ -441,48 +492,232 @@ class DownloadManager:
             raise
 
 
+@dataclass(frozen=True)
+class CacheSettings:
+    html_ttl_seconds: int = 15 * 60
+    html_max_age_seconds: int = 7 * 24 * 60 * 60
+    html_max_bytes: int = 512 * 1024 * 1024
+    extract_max_bytes: int = 5 * 1024 * 1024 * 1024
+    sweep_interval_seconds: int = 60 * 60
+
+    @classmethod
+    def from_env(cls, env: dict[str, str]) -> "CacheSettings":
+        names = {
+            "html_ttl_seconds": "NH_HTML_CACHE_TTL_SECONDS",
+            "html_max_age_seconds": "NH_HTML_CACHE_MAX_AGE_SECONDS",
+            "html_max_bytes": "NH_HTML_CACHE_MAX_BYTES",
+            "extract_max_bytes": "NH_EXTRACT_CACHE_MAX_BYTES",
+            "sweep_interval_seconds": "NH_CACHE_SWEEP_INTERVAL_SECONDS",
+        }
+        values: dict[str, int] = {}
+        defaults = cls()
+        for field_name, env_name in names.items():
+            raw = env.get(env_name)
+            value = int(raw) if raw is not None else getattr(defaults, field_name)
+            if value <= 0:
+                raise ValueError(f"{env_name} must be greater than zero")
+            values[field_name] = value
+        return cls(**values)
+
+
+class LocalCache:
+    """Bounded HTML and extracted-image cache rooted inside the library."""
+
+    def __init__(self, manager: DownloadManager, settings: CacheSettings, *, autostart: bool = True) -> None:
+        self.manager = manager
+        self.settings = settings
+        self.lock = threading.RLock()
+        self.stop_event = threading.Event()
+        self.worker: threading.Thread | None = None
+        if autostart:
+            self.worker = threading.Thread(target=self._sweep_loop, name="nh-cache-sweeper", daemon=True)
+            self.worker.start()
+
+    def proxy_path(self, path_with_query: str) -> Path:
+        digest = hashlib.sha256(path_with_query.encode("utf-8")).hexdigest()
+        return self.manager.local_cache_root() / "proxy" / f"{digest}.html"
+
+    def read_html(self, path: Path) -> tuple[str, bool] | None:
+        try:
+            stat = path.stat()
+            source = path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return None
+        now = time.time()
+        try:
+            os.utime(path, (now, stat.st_mtime))
+        except FileNotFoundError:
+            pass
+        return source, now - stat.st_mtime <= self.settings.html_ttl_seconds
+
+    def write_html(self, path: Path, source: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temp.write_text(source, encoding="utf-8")
+        os.replace(temp, path)
+        self.cleanup()
+
+    def touch_extract(self, extract_dir: Path) -> None:
+        marker = extract_dir / ".complete"
+        if marker.exists():
+            try:
+                marker.touch()
+            except FileNotFoundError:
+                pass
+
+    def cleanup(self, *, protect_extract: str | None = None) -> None:
+        if not self.lock.acquire(blocking=False):
+            return
+        try:
+            self._cleanup_html()
+            self._cleanup_extract(protect_extract=protect_extract)
+        finally:
+            self.lock.release()
+
+    def _cleanup_html(self) -> None:
+        root = self.manager.local_cache_root()
+        files: list[tuple[float, int, Path]] = []
+        now = time.time()
+        for name in ("html", "metadata", "proxy"):
+            directory = root / name
+            if not directory.exists():
+                continue
+            for path in directory.rglob("*"):
+                if not path.is_file() or path.name.startswith("."):
+                    continue
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                last_used = max(stat.st_atime, stat.st_mtime)
+                if now - last_used > self.settings.html_max_age_seconds:
+                    path.unlink(missing_ok=True)
+                    continue
+                files.append((last_used, stat.st_size, path))
+        total = sum(item[1] for item in files)
+        for _last_used, size, path in sorted(files):
+            if total <= self.settings.html_max_bytes:
+                break
+            try:
+                path.unlink()
+                total -= size
+            except FileNotFoundError:
+                pass
+
+    def _cleanup_extract(self, *, protect_extract: str | None = None) -> None:
+        root = self.manager.local_cache_root() / "extract"
+        if not root.exists():
+            return
+        entries: list[tuple[float, int, Path]] = []
+        for directory in root.iterdir():
+            if not directory.is_dir() or directory.name.startswith("."):
+                continue
+            marker = directory / ".complete"
+            try:
+                last_used = marker.stat().st_mtime
+            except FileNotFoundError:
+                last_used = directory.stat().st_mtime
+            size = sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
+            entries.append((last_used, size, directory))
+        total = sum(item[1] for item in entries)
+        for _last_used, size, directory in sorted(entries):
+            if total <= self.settings.extract_max_bytes:
+                break
+            gallery_id = directory.name
+            if gallery_id == protect_extract:
+                continue
+            lock = self.manager.gallery_lock(gallery_id)
+            if not lock.acquire(blocking=False):
+                continue
+            try:
+                if directory.exists():
+                    shutil.rmtree(directory)
+                    total -= size
+            finally:
+                lock.release()
+
+    def _sweep_loop(self) -> None:
+        while not self.stop_event.wait(self.settings.sweep_interval_seconds):
+            self.cleanup()
+
+
 class LocalLibrary:
-    def __init__(self, manager: DownloadManager, *, env: dict[str, str] | None = None) -> None:
+    PUBLIC_PREFIXES = {
+        "artist",
+        "artists",
+        "categories",
+        "category",
+        "character",
+        "characters",
+        "community",
+        "group",
+        "groups",
+        "info",
+        "language",
+        "languages",
+        "parodies",
+        "parody",
+        "random",
+        "search",
+        "tag",
+        "tags",
+        "users",
+    }
+    BLOCKED_PREFIXES = {"api", "favorites", "login", "register", "upload"}
+
+    def __init__(
+        self,
+        manager: DownloadManager,
+        *,
+        env: dict[str, str] | None = None,
+        cache_settings: CacheSettings | None = None,
+        cache_autostart: bool = True,
+    ) -> None:
         self.manager = manager
         self.env = dict(env or os.environ)
+        self.cache = LocalCache(
+            manager,
+            cache_settings or CacheSettings.from_env(self.env),
+            autostart=cache_autostart,
+        )
 
     def gallery_html(self, gallery_id: str) -> str:
         cache_path = self.manager.local_html_dir(gallery_id) / "cover_page.html"
-        if cache_path.exists():
-            source = cache_path.read_text(encoding="utf-8", errors="replace")
-            if not self.manager.local_metadata_path(gallery_id).exists():
-                self._cache_metadata(gallery_id, source)
-        else:
-            try:
-                source = self._fetch_nhentai_html(f"/g/{gallery_id}/")
-            except Exception:
-                source = self._fallback_gallery_html(gallery_id)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(source, encoding="utf-8")
-            self._cache_metadata(gallery_id, source)
-        return self.rewrite_html(source)
+        try:
+            source, stale = self._cached_html(cache_path, f"/g/{gallery_id}/")
+        except Exception:
+            if not self.manager.archive_path(gallery_id).exists():
+                raise
+            source = self._archive_cover_html(gallery_id) or self._fallback_gallery_html(gallery_id)
+            stale = False
+        self._cache_metadata(gallery_id, source)
+        return self.rewrite_html(source, stale=stale)
 
     def reader_html(self, gallery_id: str, page: str) -> str:
-        local_image = self.page_image_path(gallery_id, page) if self.manager.archive_path(gallery_id).exists() else None
-        source = self._cached_reader_html(gallery_id, page)
+        if not self.manager.archive_path(gallery_id).exists():
+            return self._download_required_html(gallery_id)
+        local_image = self.page_image_path(gallery_id, page)
         if local_image is None:
-            return self.rewrite_html(source)
+            return self._fallback_reader_html(gallery_id, page, None)
+        try:
+            source, stale = self._cached_html(
+                self.manager.local_html_dir(gallery_id) / f"{page}.html",
+                f"/g/{gallery_id}/{page}/",
+            )
+        except Exception:
+            return self._fallback_reader_html(gallery_id, page, f"/media/{gallery_id}/{quote(local_image.name)}")
 
         local_src = f"/media/{gallery_id}/{quote(local_image.name)}"
         replaced = PAGE_IMAGE_RE.sub(rf'\g<prefix>{local_src}\g<suffix>', source, count=1)
         if replaced != source:
-            return self.rewrite_html(replaced)
+            return self.rewrite_html(replaced, stale=stale)
         return self._fallback_reader_html(gallery_id, page, local_src)
 
     def proxy_html(self, path_with_query: str) -> str:
-        cache_path = self.manager.local_cache_root() / "proxy" / f"{quote(path_with_query, safe='')}.html"
-        if cache_path.exists():
-            source = cache_path.read_text(encoding="utf-8", errors="replace")
-        else:
-            source = self._fetch_nhentai_html(path_with_query)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(source, encoding="utf-8")
-        return self.rewrite_html(source)
+        if not self.is_public_html_path(path_with_query):
+            raise PermissionError("route is not available on the local gallery")
+        source, stale = self._cached_html(self.cache.proxy_path(path_with_query), path_with_query)
+        return self.rewrite_html(source, stale=stale)
 
     def proxy_response(self, path_with_query: str) -> tuple[bytes, str]:
         if self._looks_like_html_path(path_with_query):
@@ -499,8 +734,10 @@ class LocalLibrary:
             for path in extract_dir.rglob("*")
             if path.is_file()
             and path.stem == page
-            and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+            and path.suffix.lower() in IMAGE_SUFFIXES
         ]
+        if candidates:
+            self.cache.touch_extract(extract_dir)
         return sorted(candidates)[0] if candidates else None
 
     def media_path(self, gallery_id: str, filename: str) -> Path | None:
@@ -513,35 +750,65 @@ class LocalLibrary:
                     path.resolve().relative_to(extract_dir.resolve())
                 except ValueError:
                     continue
+                self.cache.touch_extract(extract_dir)
                 return path
         return None
 
-    def rewrite_html(self, source: str) -> str:
+    def rewrite_html(self, source: str, *, stale: bool = False) -> str:
+        source = re.sub(r"<meta\b[^>]*(?:delegate-ch|tsyndicate|exoclick)[^>]*>", "", source, flags=re.IGNORECASE)
+        source = re.sub(
+            r"<script\b[^>]*\bsrc=[\"'][^\"']*(?:cloudflareinsights|tsyndicate|exoclick|popads)[^\"']*[\"'][^>]*>\s*</script>",
+            "",
+            source,
+            flags=re.IGNORECASE,
+        )
+        source = re.sub(r"<iframe\b[^>]*>.*?</iframe>", "", source, flags=re.IGNORECASE | re.DOTALL)
+        source = re.sub(
+            r"<a\b[^>]*\bhref=[\"'](?:https?:)?//[^\"']*(?:tsyndicate|exoclick|popads)[^\"']*[\"'][^>]*>.*?</a>",
+            "",
+            source,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        source = re.sub(
+            r"<li\b[^>]*\bclass=[\"'][^\"']*(?:menu-sign-in|menu-register)[^\"']*[\"'][^>]*>.*?</li>",
+            "",
+            source,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         rewritten = ABS_NHENTAI_HREF_RE.sub(r"\g<prefix>\g<url>\g<suffix>", source)
         rewritten = INTERNAL_HREF_RE.sub(lambda match: f"{match.group('prefix')}{match.group('url')}{match.group('suffix')}", rewritten)
-        return self._inject_local_navigation(rewritten)
+        rewritten = self._inject_local_navigation(rewritten)
+        if stale:
+            banner = '<div class="nh-local-stale">Upstream unavailable — showing cached content.</div>'
+            rewritten = re.sub(r"(<body\b[^>]*>)", rf"\1{banner}", rewritten, count=1, flags=re.IGNORECASE)
+        return rewritten
 
     def _inject_local_navigation(self, source: str) -> str:
         if "data-nh-local-navigation" in source:
             return source
-        script = LOCAL_NAVIGATION_SCRIPT.replace("<script>", '<script data-nh-local-navigation="true">', 1)
+        assets = (
+            '<link data-nh-local-navigation="true" rel="stylesheet" href="/_nh-local/assets/local.css">'
+            + LOCAL_NAVIGATION_SCRIPT.replace("<script>", '<script data-nh-local-navigation="true">', 1)
+            + '<script defer src="/_nh-local/assets/local.js"></script>'
+        )
         if "<head>" in source:
-            return source.replace("<head>", f"<head>{script}", 1)
+            return source.replace("<head>", f"<head>{assets}", 1)
         if "<head " in source:
-            return re.sub(r"(<head\b[^>]*>)", rf"\1{script}", source, count=1, flags=re.IGNORECASE)
-        return f"{script}{source}"
+            return re.sub(r"(<head\b[^>]*>)", rf"\1{assets}", source, count=1, flags=re.IGNORECASE)
+        return f"{assets}{source}"
 
-    def _cached_reader_html(self, gallery_id: str, page: str) -> str:
-        cache_path = self.manager.local_html_dir(gallery_id) / f"{page}.html"
-        if cache_path.exists():
-            return cache_path.read_text(encoding="utf-8", errors="replace")
+    def _cached_html(self, cache_path: Path, upstream_path: str) -> tuple[str, bool]:
+        cached = self.cache.read_html(cache_path)
+        if cached is not None and cached[1]:
+            return cached[0], False
         try:
-            source = self._fetch_nhentai_html(f"/g/{gallery_id}/{page}/")
+            source = self._fetch_nhentai_html(upstream_path)
         except Exception:
-            source = self._fallback_reader_html(gallery_id, page, None)
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(source, encoding="utf-8")
-        return source
+            if cached is not None:
+                return cached[0], True
+            raise
+        self.cache.write_html(cache_path, source)
+        return source, False
 
     def _fetch_nhentai_html(self, path_with_query: str) -> str:
         data, _content_type, charset = self._fetch_nhentai(path_with_query)
@@ -559,25 +826,19 @@ class LocalLibrary:
             content_type = response.headers.get("Content-Type", "application/octet-stream")
             return response.read(), content_type, charset
 
+    def is_public_html_path(self, path_with_query: str) -> bool:
+        path = urlparse(path_with_query).path
+        if path == "/":
+            return True
+        first = path.strip("/").split("/", 1)[0].lower()
+        return first in self.PUBLIC_PREFIXES and first not in self.BLOCKED_PREFIXES
+
     def _looks_like_html_path(self, path_with_query: str) -> bool:
         path = urlparse(path_with_query).path
+        if path.startswith("/_app/"):
+            return False
         suffix = Path(path).suffix.lower()
-        return suffix not in {
-            ".css",
-            ".js",
-            ".mjs",
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".webp",
-            ".svg",
-            ".ico",
-            ".woff",
-            ".woff2",
-            ".ttf",
-            ".map",
-        }
+        return suffix in {"", ".html"}
 
     def _cache_metadata(self, gallery_id: str, source: str) -> None:
         match = WINDOW_GALLERY_RE.search(source)
@@ -589,56 +850,112 @@ class LocalLibrary:
             return
         path = self.manager.local_metadata_path(gallery_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temp.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp, path)
+        self.cache.cleanup()
 
     def _ensure_extracted(self, gallery_id: str) -> Path | None:
         archive = self.manager.archive_path(gallery_id)
         if not archive.exists():
             return None
-        extract_dir = self.manager.local_extract_dir(gallery_id)
-        marker = extract_dir / ".complete"
-        if marker.exists():
-            return extract_dir
-        temp_dir = extract_dir.with_name(f".{gallery_id}.{uuid.uuid4().hex}.tmp")
-        temp_dir.mkdir(parents=True, exist_ok=True)
+        with self.manager.gallery_lock(gallery_id):
+            extract_dir = self.manager.local_extract_dir(gallery_id)
+            marker = extract_dir / ".complete"
+            if marker.exists():
+                self.cache.touch_extract(extract_dir)
+                return extract_dir
+            temp_dir = extract_dir.with_name(f".{gallery_id}.{uuid.uuid4().hex}.tmp")
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with zipfile.ZipFile(archive) as zf:
+                    members = [
+                        member
+                        for member in zf.infolist()
+                        if not member.is_dir() and Path(member.filename).suffix.lower() in IMAGE_SUFFIXES
+                    ]
+                    max_uncompressed = max(archive.stat().st_size * 20, 1024 * 1024 * 1024)
+                    if sum(member.file_size for member in members) > max_uncompressed:
+                        raise ValueError("CBZ expanded size exceeds safety limit")
+                    for member in members:
+                        target = temp_dir / member.filename
+                        try:
+                            target.resolve().relative_to(temp_dir.resolve())
+                        except ValueError:
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(member) as source, target.open("wb") as output:
+                            shutil.copyfileobj(source, output)
+                (temp_dir / ".complete").write_text("ok\n", encoding="utf-8")
+                if extract_dir.exists():
+                    shutil.rmtree(extract_dir)
+                os.replace(temp_dir, extract_dir)
+            except Exception:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise
+        self.cache.cleanup(protect_extract=gallery_id)
+        return extract_dir
+
+    def _archive_cover_html(self, gallery_id: str) -> str | None:
+        archive = self.manager.archive_path(gallery_id)
+        if not archive.exists():
+            return None
         try:
             with zipfile.ZipFile(archive) as zf:
-                for member in zf.infolist():
-                    if member.is_dir():
-                        continue
-                    target = temp_dir / member.filename
-                    try:
-                        target.resolve().relative_to(temp_dir.resolve())
-                    except ValueError:
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(member) as source, target.open("wb") as output:
-                        shutil.copyfileobj(source, output)
-            (temp_dir / ".complete").write_text("ok\n", encoding="utf-8")
-            if extract_dir.exists():
-                shutil.rmtree(extract_dir)
-            os.replace(temp_dir, extract_dir)
-            return extract_dir
-        except Exception:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise
+                candidates = [name for name in zf.namelist() if Path(name).name == "cover_page.html"]
+                if not candidates:
+                    return None
+                return zf.read(sorted(candidates)[0]).decode("utf-8", "replace")
+        except (OSError, zipfile.BadZipFile, KeyError):
+            return None
+
+    def _gallery_images(self, gallery_id: str) -> list[Path]:
+        extract_dir = self._ensure_extracted(gallery_id)
+        if extract_dir is None:
+            return []
+        images = [
+            path
+            for path in extract_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES and path.stem.isdigit()
+        ]
+
+        def sort_key(path: Path) -> tuple[int, int | str, str]:
+            return (0, int(path.stem), path.name) if path.stem.isdigit() else (1, path.stem, path.name)
+
+        return sorted(images, key=sort_key)
 
     def _fallback_gallery_html(self, gallery_id: str) -> str:
         title = f"Gallery {gallery_id}"
+        images = self._gallery_images(gallery_id)
+        cover = f'<img src="/media/{gallery_id}/{quote(images[0].name)}" alt="{html.escape(title)}">' if images else ""
         return (
             "<!doctype html><html><head>"
             f"<title>{html.escape(title)}</title>"
-            "</head><body>"
+            "<style>body{background:#111;color:#eee;font-family:sans-serif;max-width:1000px;margin:auto;padding:24px}"
+            "a{color:#ff4774}img{max-width:320px;height:auto}</style></head><body>"
             f"<h1>{html.escape(title)}</h1>"
-            f"<p>Local archive: {html.escape(self.manager.archive_path(gallery_id).name)}</p>"
+            f"{cover}<p>Local archive: {html.escape(self.manager.archive_path(gallery_id).name)} · {len(images)} pages</p>"
             f"<p><a href=\"/g/{gallery_id}/1/\">Open reader</a></p>"
             "</body></html>"
+        )
+
+    def _download_required_html(self, gallery_id: str) -> str:
+        title = f"Gallery {gallery_id} is not downloaded"
+        return self.rewrite_html(
+            "<!doctype html><html><head>"
+            f"<title>{html.escape(title)}</title>"
+            "<style>body{margin:0;background:#111;color:#eee;text-align:center;font-family:sans-serif;padding:10vh 20px}"
+            "a{color:#ff4774}</style></head><body>"
+            f"<main id=\"info\"><h1>{html.escape(title)}</h1>"
+            "<p>Full-size pages are available only after the CBZ has been downloaded.</p>"
+            f"<p><a href=\"/g/{gallery_id}/\">Back to gallery</a></p></main></body></html>"
         )
 
     def _fallback_reader_html(self, gallery_id: str, page: str, image_src: str | None) -> str:
         title = f"Gallery {gallery_id} - page {page}"
         image = f'<img src="{html.escape(image_src)}" alt="{html.escape(title)}">' if image_src else "<p>Page image unavailable.</p>"
-        next_page = str(int(page) + 1) if page.isdigit() else page
+        page_count = len(self._gallery_images(gallery_id))
+        next_page = str(min(int(page) + 1, page_count or int(page) + 1)) if page.isdigit() else page
         prev_page = str(max(int(page) - 1, 1)) if page.isdigit() else page
         return (
             "<!doctype html><html><head>"
@@ -659,13 +976,13 @@ def make_handler(
         server_version = "NhDownloaderHTTP/1.0"
 
         def do_OPTIONS(self) -> None:
-            if not self._is_allowed():
+            if not self._is_allowed() or not self._origin_allowed():
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
             self._send_json({"ok": True})
 
         def do_GET(self) -> None:
-            if not self._is_allowed():
+            if not self._is_allowed() or not self._origin_allowed():
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
 
@@ -694,7 +1011,7 @@ def make_handler(
             self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
-            if not self._is_allowed():
+            if not self._is_allowed() or not self._origin_allowed():
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
 
@@ -711,8 +1028,8 @@ def make_handler(
 
             if path == "/api/galleries/status":
                 gallery_ids = payload.get("ids")
-                if not isinstance(gallery_ids, list) or not all(is_valid_gallery_id(item) for item in gallery_ids):
-                    self._send_json({"error": "ids must be a list of digit strings"}, status=HTTPStatus.BAD_REQUEST)
+                if not isinstance(gallery_ids, list) or len(gallery_ids) > 100 or not all(is_valid_gallery_id(item) for item in gallery_ids):
+                    self._send_json({"error": "ids must be a list of at most 100 digit strings"}, status=HTTPStatus.BAD_REQUEST)
                     return
                 unique_ids = list(dict.fromkeys(gallery_ids))
                 self._send_json({"galleries": manager.galleries_status(unique_ids)})
@@ -728,7 +1045,7 @@ def make_handler(
             self._send_json(job.to_dict(), status=status)
 
         def do_DELETE(self) -> None:
-            if not self._is_allowed():
+            if not self._is_allowed() or not self._origin_allowed():
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
 
@@ -755,6 +1072,8 @@ def make_handler(
                 raise ValueError("invalid Content-Length") from exc
             if length <= 0:
                 raise ValueError("empty request body")
+            if length > MAX_JSON_BODY_BYTES:
+                raise ValueError("request body is too large")
             body = self.rfile.read(length)
             try:
                 payload = json.loads(body.decode("utf-8"))
@@ -767,12 +1086,19 @@ def make_handler(
         def _is_allowed(self) -> bool:
             return is_ip_allowed(self.client_address[0], allowed_networks)
 
+        def _origin_allowed(self) -> bool:
+            origin = self.headers.get("Origin")
+            return origin is None or origin.startswith("moz-extension://")
+
         def _send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            origin = self.headers.get("Origin")
+            if origin and self._origin_allowed():
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
@@ -806,6 +1132,31 @@ def make_library_handler(
             path = parsed.path
             query = f"?{parsed.query}" if parsed.query else ""
 
+            if path == f"{LOCAL_ASSET_PREFIX}/local.css":
+                self._send_bytes(LOCAL_UI_CSS.encode("utf-8"), "text/css; charset=utf-8")
+                return
+            if path == f"{LOCAL_ASSET_PREFIX}/local.js":
+                self._send_bytes(LOCAL_UI_JS.encode("utf-8"), "text/javascript; charset=utf-8")
+                return
+            if path == f"{LOCAL_API_PREFIX}/queue":
+                self._send_json(library.manager.queue_snapshot())
+                return
+            if path.startswith(f"{LOCAL_API_PREFIX}/jobs/"):
+                job_id = path.removeprefix(f"{LOCAL_API_PREFIX}/jobs/")
+                job = library.manager.get_job(job_id)
+                if job is None:
+                    self._send_json({"error": "job not found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                self._send_json(job.to_dict())
+                return
+            if path.startswith(f"{LOCAL_API_PREFIX}/galleries/"):
+                gallery_id = path.removeprefix(f"{LOCAL_API_PREFIX}/galleries/")
+                if not is_valid_gallery_id(gallery_id):
+                    self._send_json({"error": "id must be a string of digits"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._send_json(library.manager.gallery_status(gallery_id))
+                return
+
             media_match = MEDIA_RE.fullmatch(path)
             if media_match:
                 gallery_id, filename = media_match.groups()
@@ -834,8 +1185,54 @@ def make_library_handler(
             try:
                 data, content_type = library.proxy_response(f"{path}{query}")
                 self._send_bytes(data, content_type)
+            except PermissionError as exc:
+                self._send_text(str(exc), status=HTTPStatus.NOT_FOUND)
             except Exception as exc:  # noqa: BLE001 - surface proxy failures to the browser.
                 self._send_text(f"upstream fetch failed: {exc}", status=HTTPStatus.BAD_GATEWAY)
+
+        def do_POST(self) -> None:
+            if not self._is_allowed():
+                self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
+                return
+            path = urlparse(self.path).path
+            if path not in {f"{LOCAL_API_PREFIX}/download", f"{LOCAL_API_PREFIX}/galleries/status"}:
+                self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            try:
+                payload = self._read_json()
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if path.endswith("/galleries/status"):
+                gallery_ids = payload.get("ids")
+                if not isinstance(gallery_ids, list) or len(gallery_ids) > 100 or not all(is_valid_gallery_id(item) for item in gallery_ids):
+                    self._send_json({"error": "ids must be a list of at most 100 digit strings"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                unique_ids = list(dict.fromkeys(gallery_ids))
+                self._send_json({"galleries": library.manager.galleries_status(unique_ids)})
+                return
+            gallery_id = payload.get("id")
+            if not is_valid_gallery_id(gallery_id):
+                self._send_json({"error": "id must be a string of digits"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            job, created = library.manager.submit(gallery_id)
+            self._send_json(job.to_dict(), status=HTTPStatus.ACCEPTED if created else HTTPStatus.OK)
+
+        def do_DELETE(self) -> None:
+            if not self._is_allowed():
+                self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
+                return
+            path = urlparse(self.path).path
+            prefix = f"{LOCAL_API_PREFIX}/galleries/"
+            if not path.startswith(prefix):
+                self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            gallery_id = path.removeprefix(prefix)
+            if not is_valid_gallery_id(gallery_id):
+                self._send_json({"error": "id must be a string of digits"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            result = library.manager.delete_gallery(gallery_id)
+            self._send_json(result, status=HTTPStatus.CONFLICT if result.get("blocked") else HTTPStatus.OK)
 
         def _is_allowed(self) -> bool:
             return is_ip_allowed(self.client_address[0], allowed_networks)
@@ -852,12 +1249,40 @@ def make_library_handler(
                 data = source.read()
             self._send_bytes(data, content_type)
 
+        def _read_json(self) -> dict[str, object]:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as exc:
+                raise ValueError("invalid Content-Length") from exc
+            if length <= 0:
+                raise ValueError("empty request body")
+            if length > MAX_JSON_BODY_BYTES:
+                raise ValueError("request body is too large")
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ValueError("invalid JSON body") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("JSON body must be an object")
+            return payload
+
+        def _send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
+            self._send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=status)
+
         def _send_bytes(self, data: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            if content_type.lower().startswith("text/html"):
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; img-src 'self' data: blob: https://*.nhentai.net; "
+                    "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+                    "font-src 'self' https://cdnjs.cloudflare.com; connect-src 'self'; frame-src 'none'; object-src 'none'",
+                )
             self.end_headers()
             self.wfile.write(data)
 
@@ -876,6 +1301,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cookie-file", default=os.environ.get("NH_COOKIE_FILE", str(PROJECT_ROOT / "cookie.sh")))
     parser.add_argument("--download-script", default=os.environ.get("NH_DOWNLOAD_SCRIPT", str(PROJECT_ROOT / "nh2_requireCfToken.sh")))
     parser.add_argument("--storage-dir", default=os.environ.get("NH_FOLDER_PATH"))
+    parser.add_argument("--html-cache-ttl", type=int, help="HTML freshness lifetime in seconds")
+    parser.add_argument("--html-cache-max-age", type=int, help="remove HTML cache entries unused for this many seconds")
+    parser.add_argument("--html-cache-max-bytes", type=int, help="maximum combined HTML and metadata cache size")
+    parser.add_argument("--extract-cache-max-bytes", type=int, help="maximum extracted image cache size")
+    parser.add_argument("--cache-sweep-interval", type=int, help="background cache cleanup interval in seconds")
     parser.add_argument(
         "--allowed-network",
         action="append",
@@ -891,6 +1321,16 @@ def main() -> None:
     env = load_cookie_env(Path(args.cookie_file))
     if args.storage_dir:
         env["NH_FOLDER_PATH"] = args.storage_dir
+    cache_args = {
+        "NH_HTML_CACHE_TTL_SECONDS": args.html_cache_ttl,
+        "NH_HTML_CACHE_MAX_AGE_SECONDS": args.html_cache_max_age,
+        "NH_HTML_CACHE_MAX_BYTES": args.html_cache_max_bytes,
+        "NH_EXTRACT_CACHE_MAX_BYTES": args.extract_cache_max_bytes,
+        "NH_CACHE_SWEEP_INTERVAL_SECONDS": args.cache_sweep_interval,
+    }
+    for name, value in cache_args.items():
+        if value is not None:
+            env[name] = str(value)
 
     manager = DownloadManager(
         project_root=PROJECT_ROOT,
