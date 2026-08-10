@@ -13,8 +13,10 @@ from server.nh_server import (
     CacheSettings,
     DownloadManager,
     DEFAULT_ALLOWED_NETWORKS,
-    LOCAL_UI_CSS,
+    LOCAL_UI_CSS_PATH,
+    LocalRedirect,
     LocalLibrary,
+    UpstreamResponse,
     is_ip_allowed,
     is_valid_gallery_id,
     make_library_handler,
@@ -338,11 +340,18 @@ class StubLibrary(LocalLibrary):
         self.responses = responses
         self.fetches = []
 
-    def _fetch_nhentai_html(self, path_with_query: str) -> str:
+    def _fetch_nhentai(self, path_with_query: str) -> UpstreamResponse:
         self.fetches.append(path_with_query)
         if path_with_query not in self.responses:
             raise RuntimeError(f"unexpected fetch: {path_with_query}")
-        return self.responses[path_with_query]
+        value = self.responses[path_with_query]
+        if isinstance(value, UpstreamResponse):
+            return value
+        if isinstance(value, tuple):
+            source, final_path = value
+        else:
+            source, final_path = value, path_with_query
+        return UpstreamResponse(source.encode(), "text/html; charset=utf-8", "utf-8", 200, final_path)
 
 
 class LocalLibraryTests(unittest.TestCase):
@@ -378,6 +387,90 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertIn("data-nh-local-navigation", rewritten)
             self.assertIn("/_nh-local/assets/local.js", rewritten)
 
+    def test_rewrite_makes_svelte_assets_root_relative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = LocalLibrary(manager, cache_autostart=False)
+            source = (
+                '<html><head><link href="./_app/immutable/app.css">'
+                '<script>import("../../_app/immutable/app.js")</script></head></html>'
+            )
+
+            rendered = library.rewrite_html(source)
+
+            self.assertIn('href="/_app/immutable/app.css"', rendered)
+            self.assertIn('import("/_app/immutable/app.js")', rendered)
+
+    def test_proxy_surfaces_upstream_canonical_redirect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(
+                manager,
+                {"/search/?q=test": ("<html></html>", "/search?q=test")},
+            )
+
+            with self.assertRaises(LocalRedirect) as caught:
+                library.proxy_html("/search/?q=test")
+
+            self.assertEqual(caught.exception.location, "/search?q=test")
+
+    def test_random_redirect_is_never_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(manager, {"/random/": ("<html></html>", "/g/123456/")})
+
+            for _ in range(2):
+                with self.assertRaises(LocalRedirect) as caught:
+                    library.proxy_html("/random/")
+                self.assertTrue(caught.exception.no_store)
+
+            self.assertEqual(library.fetches, ["/random/", "/random/"])
+
+    def test_public_api_allowlist_blocks_write_and_account_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(manager, {})
+
+            self.assertTrue(library.is_public_api_path("/api/v2/search"))
+            self.assertTrue(library.is_public_api_path("/api/v2/galleries/123456/comments"))
+            self.assertTrue(library.is_public_api_path("/api/v2/taxonomy/12/edits"))
+            self.assertFalse(library.is_public_api_path("/api/v2/favorites"))
+            self.assertFalse(library.is_public_api_path("/api/v2/galleries/123456/favorite"))
+            self.assertFalse(library.is_public_api_path("/api/v2/moderation/users/1"))
+
+    def test_public_api_cache_and_stale_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            settings = self.small_settings(api_ttl_seconds=1)
+            path = "/api/v2/search?query=test"
+            response = UpstreamResponse(b'{"result":[]}', "application/json", "utf-8", 200, path)
+            library = StubLibrary(manager, {path: response}, settings)
+
+            first = library.public_api_response(path)
+            second = library.public_api_response(path)
+            cache_path = library.cache.api_path(path)
+            old = time.time() - 5
+            os.utime(cache_path, (old, old))
+            library.responses.clear()
+            stale = library.public_api_response(path)
+
+            self.assertEqual(first.data, b'{"result":[]}')
+            self.assertEqual(second.data, first.data)
+            self.assertEqual(library.fetches, [path, path])
+            self.assertTrue(stale.stale)
+
+    def test_zones_api_is_empty_without_upstream_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(manager, {})
+
+            response = library.public_api_response("/api/v2/zones")
+            nested_response = library.public_api_response("/api/v2/zones/i")
+
+            self.assertEqual(json.loads(response.data), {"zones": {}})
+            self.assertEqual(json.loads(nested_response.data), {"zones": {}})
+            self.assertEqual(library.fetches, [])
+
     def test_rewrite_removes_tracking_script_and_iframe(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
@@ -396,7 +489,7 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertNotIn("tsyndicate", rendered)
             self.assertNotIn("<iframe", rendered)
             self.assertNotIn('href="/login/"', rendered)
-            self.assertIn('a[href^="/login"]', LOCAL_UI_CSS)
+            self.assertIn('a[href^="/login"]', LOCAL_UI_CSS_PATH.read_text())
 
     def test_fresh_html_cache_avoids_second_upstream_fetch(self):
         with tempfile.TemporaryDirectory() as tmp:

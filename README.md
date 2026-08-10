@@ -77,14 +77,16 @@ their original CDN URLs; full reader images are served only from local
 `{id}.cbz` archives. An undownloaded reader page shows a download prompt instead
 of loading remote full-size images.
 
-Cached HTML, metadata, and extracted CBZ files live under `~/nh/.nh-local/`.
-HTML is fresh for 15 minutes, stale pages are used if upstream is unavailable,
+Cached HTML, read-only API responses, metadata, and extracted CBZ files live
+under `~/nh/.nh-local/`. HTML is fresh for 15 minutes, public API JSON is
+fresh for 60 seconds, stale responses are used if upstream is unavailable,
 and entries unused for seven days are removed. HTML/metadata are capped at
 512 MiB and extracted images use a 5 GiB LRU cache. The original CBZ is never
 removed by extraction or cache cleanup. The limits can be changed with:
 
 ```text
 NH_HTML_CACHE_TTL_SECONDS
+NH_API_CACHE_TTL_SECONDS
 NH_HTML_CACHE_MAX_AGE_SECONDS
 NH_HTML_CACHE_MAX_BYTES
 NH_EXTRACT_CACHE_MAX_BYTES
@@ -96,6 +98,25 @@ The library UI uses same-origin endpoints under `/_nh-local/api/`; the existing
 port 8765 API remains available to the Firefox extension and command-line
 clients. Browser origins other than Firefox extension origins are rejected on
 port 8765.
+
+nhentai canonical redirects are preserved locally, so routes such as search,
+tags, taxonomy, and random resolve to their canonical local URL. Only the
+anonymous read-only `/api/v2/` endpoints required by those pages are proxied;
+account, favorite, comment, voting, moderation, and other write operations are
+not exposed.
+
+Run the deterministic browser test with Playwright-managed Chromium:
+
+```bash
+deno run -A npm:playwright@1.62.1 install chromium
+deno task e2e
+```
+
+With the local service running, the opt-in live smoke test is:
+
+```bash
+NH_RUN_LIVE_E2E=1 deno task e2e:live
+```
 
 To install the systemd service:
 

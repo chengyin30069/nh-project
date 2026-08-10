@@ -25,10 +25,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import quote, unquote, urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_UI_CSS_PATH = PROJECT_ROOT / "server" / "static" / "local-ui.css"
+LOCAL_UI_JS_PATH = PROJECT_ROOT / "server" / "static" / "local-ui.js"
 DEFAULT_ALLOWED_NETWORKS = (
     "192.168.50.0/24",
     "192.168.193.0/24",
@@ -495,6 +498,7 @@ class DownloadManager:
 @dataclass(frozen=True)
 class CacheSettings:
     html_ttl_seconds: int = 15 * 60
+    api_ttl_seconds: int = 60
     html_max_age_seconds: int = 7 * 24 * 60 * 60
     html_max_bytes: int = 512 * 1024 * 1024
     extract_max_bytes: int = 5 * 1024 * 1024 * 1024
@@ -504,6 +508,7 @@ class CacheSettings:
     def from_env(cls, env: dict[str, str]) -> "CacheSettings":
         names = {
             "html_ttl_seconds": "NH_HTML_CACHE_TTL_SECONDS",
+            "api_ttl_seconds": "NH_API_CACHE_TTL_SECONDS",
             "html_max_age_seconds": "NH_HTML_CACHE_MAX_AGE_SECONDS",
             "html_max_bytes": "NH_HTML_CACHE_MAX_BYTES",
             "extract_max_bytes": "NH_EXTRACT_CACHE_MAX_BYTES",
@@ -537,6 +542,23 @@ class LocalCache:
         digest = hashlib.sha256(path_with_query.encode("utf-8")).hexdigest()
         return self.manager.local_cache_root() / "proxy" / f"{digest}.html"
 
+    def api_path(self, path_with_query: str) -> Path:
+        digest = hashlib.sha256(path_with_query.encode("utf-8")).hexdigest()
+        return self.manager.local_cache_root() / "proxy" / f"api-{digest}.json"
+
+    def read_bytes(self, path: Path, ttl_seconds: int) -> tuple[bytes, bool] | None:
+        try:
+            stat = path.stat()
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        now = time.time()
+        try:
+            os.utime(path, (now, stat.st_mtime))
+        except FileNotFoundError:
+            pass
+        return data, now - stat.st_mtime <= ttl_seconds
+
     def read_html(self, path: Path) -> tuple[str, bool] | None:
         try:
             stat = path.stat()
@@ -551,9 +573,12 @@ class LocalCache:
         return source, now - stat.st_mtime <= self.settings.html_ttl_seconds
 
     def write_html(self, path: Path, source: str) -> None:
+        self.write_bytes(path, source.encode("utf-8"))
+
+    def write_bytes(self, path: Path, data: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        temp.write_text(source, encoding="utf-8")
+        temp.write_bytes(data)
         os.replace(temp, path)
         self.cleanup()
 
@@ -641,6 +666,30 @@ class LocalCache:
             self.cleanup()
 
 
+@dataclass(frozen=True)
+class UpstreamResponse:
+    data: bytes
+    content_type: str
+    charset: str
+    status: int
+    final_path: str
+
+
+@dataclass(frozen=True)
+class ProxyResponse:
+    data: bytes
+    content_type: str
+    status: int = HTTPStatus.OK
+    stale: bool = False
+
+
+class LocalRedirect(Exception):
+    def __init__(self, location: str, *, no_store: bool = False) -> None:
+        super().__init__(location)
+        self.location = location
+        self.no_store = no_store
+
+
 class LocalLibrary:
     PUBLIC_PREFIXES = {
         "artist",
@@ -661,9 +710,19 @@ class LocalLibrary:
         "search",
         "tag",
         "tags",
+        "taxonomy",
         "users",
     }
     BLOCKED_PREFIXES = {"api", "favorites", "login", "register", "upload"}
+    PUBLIC_API_PATTERNS = (
+        re.compile(r"^/api/v2/(?:cdn|config)$"),
+        re.compile(r"^/api/v2/galleries(?:/(?:popular|random|tagged|[0-9]+(?:/(?:comments|related|suggestions))?))?$"),
+        re.compile(r"^/api/v2/gts/(?:backlog|new-tags)$"),
+        re.compile(r"^/api/v2/search$"),
+        re.compile(r"^/api/v2/tags/(?:search|(?:tag|artist|parody|character|group|language|category)(?:/[^/]+)?)$"),
+        re.compile(r"^/api/v2/taxonomy(?:/(?:resolved|stats|[0-9]+(?:/(?:comments|edits))?))?$"),
+        re.compile(r"^/api/v2/users/[0-9]+/[^/]+$"),
+    )
 
     def __init__(
         self,
@@ -716,14 +775,38 @@ class LocalLibrary:
     def proxy_html(self, path_with_query: str) -> str:
         if not self.is_public_html_path(path_with_query):
             raise PermissionError("route is not available on the local gallery")
-        source, stale = self._cached_html(self.cache.proxy_path(path_with_query), path_with_query)
+        source, stale = self._cached_proxy_html(path_with_query)
         return self.rewrite_html(source, stale=stale)
 
-    def proxy_response(self, path_with_query: str) -> tuple[bytes, str]:
+    def proxy_response(self, path_with_query: str) -> ProxyResponse:
         if self._looks_like_html_path(path_with_query):
-            return self.proxy_html(path_with_query).encode("utf-8"), "text/html; charset=utf-8"
-        data, content_type, _ = self._fetch_nhentai(path_with_query)
-        return data, content_type
+            return ProxyResponse(self.proxy_html(path_with_query).encode("utf-8"), "text/html; charset=utf-8")
+        response = self._fetch_nhentai(path_with_query)
+        return ProxyResponse(response.data, response.content_type, response.status)
+
+    def public_api_response(self, path_with_query: str) -> ProxyResponse:
+        path = urlparse(path_with_query).path
+        if path == "/api/v2/zones" or path.startswith("/api/v2/zones/"):
+            return ProxyResponse(b'{"zones":{}}', "application/json; charset=utf-8")
+        if not self.is_public_api_path(path):
+            raise PermissionError("API route is not available on the local gallery")
+
+        cache_path = self.cache.api_path(path_with_query)
+        cached = self.cache.read_bytes(cache_path, self.cache.settings.api_ttl_seconds)
+        if cached is not None and cached[1]:
+            return ProxyResponse(cached[0], "application/json; charset=utf-8")
+        try:
+            response = self._fetch_nhentai(path_with_query)
+        except Exception:
+            if cached is not None:
+                return ProxyResponse(cached[0], "application/json; charset=utf-8", stale=True)
+            raise
+        if 200 <= response.status < 300:
+            self.cache.write_bytes(cache_path, response.data)
+            return ProxyResponse(response.data, response.content_type, response.status)
+        if response.status >= 500 and cached is not None:
+            return ProxyResponse(cached[0], "application/json; charset=utf-8", stale=True)
+        return ProxyResponse(response.data, response.content_type, response.status)
 
     def page_image_path(self, gallery_id: str, page: str) -> Path | None:
         extract_dir = self._ensure_extracted(gallery_id)
@@ -777,6 +860,7 @@ class LocalLibrary:
         )
         rewritten = ABS_NHENTAI_HREF_RE.sub(r"\g<prefix>\g<url>\g<suffix>", source)
         rewritten = INTERNAL_HREF_RE.sub(lambda match: f"{match.group('prefix')}{match.group('url')}{match.group('suffix')}", rewritten)
+        rewritten = re.sub(r'(?P<quote>["\'])(?:(?:\.\./)|(?:\./))+_app/', r'\g<quote>/_app/', rewritten)
         rewritten = self._inject_local_navigation(rewritten)
         if stale:
             banner = '<div class="nh-local-stale">Upstream unavailable — showing cached content.</div>'
@@ -810,21 +894,60 @@ class LocalLibrary:
         self.cache.write_html(cache_path, source)
         return source, False
 
-    def _fetch_nhentai_html(self, path_with_query: str) -> str:
-        data, _content_type, charset = self._fetch_nhentai(path_with_query)
-        return data.decode(charset, "replace")
+    def _cached_proxy_html(self, path_with_query: str) -> tuple[str, bool]:
+        cache_path = self.cache.proxy_path(path_with_query)
+        is_random = urlparse(path_with_query).path.rstrip("/") == "/random"
+        cached = None if is_random else self.cache.read_html(cache_path)
+        if cached is not None and cached[1]:
+            return cached[0], False
+        try:
+            response = self._fetch_nhentai(path_with_query)
+            if response.final_path != self._normalized_path(path_with_query):
+                raise LocalRedirect(response.final_path, no_store=is_random)
+            if response.status >= 400:
+                raise RuntimeError(f"upstream returned HTTP {response.status}")
+            source = response.data.decode(response.charset, "replace")
+        except LocalRedirect:
+            raise
+        except Exception:
+            if cached is not None:
+                return cached[0], True
+            raise
+        self.cache.write_html(cache_path, source)
+        return source, False
 
-    def _fetch_nhentai(self, path_with_query: str) -> tuple[bytes, str, str]:
+    def _fetch_nhentai_html(self, path_with_query: str) -> str:
+        response = self._fetch_nhentai(path_with_query)
+        if response.status >= 400:
+            raise RuntimeError(f"upstream returned HTTP {response.status}")
+        return response.data.decode(response.charset, "replace")
+
+    def _fetch_nhentai(self, path_with_query: str) -> UpstreamResponse:
         headers = {}
         if self.env.get("NH_COOKIE"):
             headers["Cookie"] = self.env["NH_COOKIE"]
         if self.env.get("NH_USER_AGENT"):
             headers["User-Agent"] = self.env["NH_USER_AGENT"]
         request = Request(f"https://nhentai.net{path_with_query}", headers=headers)
-        with urlopen(request, timeout=20) as response:  # noqa: S310 - user-configured local proxy target.
+        try:
+            response = urlopen(request, timeout=20)  # noqa: S310 - fixed upstream host.
+        except HTTPError as exc:
+            response = exc
+        with response:
+            final_url = urlparse(response.geturl())
+            if final_url.scheme != "https" or final_url.hostname != "nhentai.net":
+                raise PermissionError("upstream redirected outside nhentai.net")
             charset = response.headers.get_content_charset() or "utf-8"
             content_type = response.headers.get("Content-Type", "application/octet-stream")
-            return response.read(), content_type, charset
+            final_path = final_url.path or "/"
+            if final_url.query:
+                final_path = f"{final_path}?{final_url.query}"
+            return UpstreamResponse(response.read(), content_type, charset, response.status, final_path)
+
+    def _normalized_path(self, path_with_query: str) -> str:
+        parsed = urlparse(path_with_query)
+        path = parsed.path or "/"
+        return f"{path}?{parsed.query}" if parsed.query else path
 
     def is_public_html_path(self, path_with_query: str) -> bool:
         path = urlparse(path_with_query).path
@@ -832,6 +955,9 @@ class LocalLibrary:
             return True
         first = path.strip("/").split("/", 1)[0].lower()
         return first in self.PUBLIC_PREFIXES and first not in self.BLOCKED_PREFIXES
+
+    def is_public_api_path(self, path: str) -> bool:
+        return any(pattern.fullmatch(path) for pattern in self.PUBLIC_API_PATTERNS)
 
     def _looks_like_html_path(self, path_with_query: str) -> bool:
         path = urlparse(path_with_query).path
@@ -1133,10 +1259,10 @@ def make_library_handler(
             query = f"?{parsed.query}" if parsed.query else ""
 
             if path == f"{LOCAL_ASSET_PREFIX}/local.css":
-                self._send_bytes(LOCAL_UI_CSS.encode("utf-8"), "text/css; charset=utf-8")
+                self._send_file(LOCAL_UI_CSS_PATH)
                 return
             if path == f"{LOCAL_ASSET_PREFIX}/local.js":
-                self._send_bytes(LOCAL_UI_JS.encode("utf-8"), "text/javascript; charset=utf-8")
+                self._send_file(LOCAL_UI_JS_PATH)
                 return
             if path == f"{LOCAL_API_PREFIX}/queue":
                 self._send_json(library.manager.queue_snapshot())
@@ -1155,6 +1281,14 @@ def make_library_handler(
                     self._send_json({"error": "id must be a string of digits"}, status=HTTPStatus.BAD_REQUEST)
                     return
                 self._send_json(library.manager.gallery_status(gallery_id))
+                return
+            if path.startswith("/api/v2/"):
+                try:
+                    self._send_proxy(library.public_api_response(f"{path}{query}"))
+                except PermissionError as exc:
+                    self._send_text(str(exc), status=HTTPStatus.FORBIDDEN)
+                except Exception as exc:  # noqa: BLE001 - surface read-only proxy failures.
+                    self._send_text(f"upstream API fetch failed: {exc}", status=HTTPStatus.BAD_GATEWAY)
                 return
 
             media_match = MEDIA_RE.fullmatch(path)
@@ -1183,8 +1317,9 @@ def make_library_handler(
                 return
 
             try:
-                data, content_type = library.proxy_response(f"{path}{query}")
-                self._send_bytes(data, content_type)
+                self._send_proxy(library.proxy_response(f"{path}{query}"))
+            except LocalRedirect as redirect:
+                self._send_redirect(redirect.location, no_store=redirect.no_store)
             except PermissionError as exc:
                 self._send_text(str(exc), status=HTTPStatus.NOT_FOUND)
             except Exception as exc:  # noqa: BLE001 - surface proxy failures to the browser.
@@ -1249,6 +1384,17 @@ def make_library_handler(
                 data = source.read()
             self._send_bytes(data, content_type)
 
+        def _send_proxy(self, response: ProxyResponse) -> None:
+            extra_headers = {"X-NH-Cache": "stale"} if response.stale else None
+            self._send_bytes(response.data, response.content_type, status=response.status, extra_headers=extra_headers)
+
+        def _send_redirect(self, location: str, *, no_store: bool = False) -> None:
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store" if no_store else "private, max-age=900")
+            self.end_headers()
+
         def _read_json(self) -> dict[str, object]:
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1269,13 +1415,22 @@ def make_library_handler(
         def _send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
             self._send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=status)
 
-        def _send_bytes(self, data: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        def _send_bytes(
+            self,
+            data: bytes,
+            content_type: str,
+            status: int = HTTPStatus.OK,
+            *,
+            extra_headers: dict[str, str] | None = None,
+        ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
             if content_type.lower().startswith("text/html"):
                 self.send_header(
                     "Content-Security-Policy",
@@ -1302,6 +1457,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-script", default=os.environ.get("NH_DOWNLOAD_SCRIPT", str(PROJECT_ROOT / "nh2_requireCfToken.sh")))
     parser.add_argument("--storage-dir", default=os.environ.get("NH_FOLDER_PATH"))
     parser.add_argument("--html-cache-ttl", type=int, help="HTML freshness lifetime in seconds")
+    parser.add_argument("--api-cache-ttl", type=int, help="public read-only API freshness lifetime in seconds")
     parser.add_argument("--html-cache-max-age", type=int, help="remove HTML cache entries unused for this many seconds")
     parser.add_argument("--html-cache-max-bytes", type=int, help="maximum combined HTML and metadata cache size")
     parser.add_argument("--extract-cache-max-bytes", type=int, help="maximum extracted image cache size")
@@ -1323,6 +1479,7 @@ def main() -> None:
         env["NH_FOLDER_PATH"] = args.storage_dir
     cache_args = {
         "NH_HTML_CACHE_TTL_SECONDS": args.html_cache_ttl,
+        "NH_API_CACHE_TTL_SECONDS": args.api_cache_ttl,
         "NH_HTML_CACHE_MAX_AGE_SECONDS": args.html_cache_max_age,
         "NH_HTML_CACHE_MAX_BYTES": args.html_cache_max_bytes,
         "NH_EXTRACT_CACHE_MAX_BYTES": args.extract_cache_max_bytes,
