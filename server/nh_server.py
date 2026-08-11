@@ -29,6 +29,11 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+try:
+    from server.library_db import GALLERY_TYPES, LibraryDatabase, LibraryIndexer, parse_gallery_metadata
+except ModuleNotFoundError:  # Direct execution: python3 server/nh_server.py
+    from library_db import GALLERY_TYPES, LibraryDatabase, LibraryIndexer, parse_gallery_metadata
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_UI_CSS_PATH = PROJECT_ROOT / "server" / "static" / "local-ui.css"
@@ -44,8 +49,14 @@ TERMINAL_STATUSES = {"succeeded", "failed"}
 GALLERY_ID_RE = re.compile(r"^[0-9]+$")
 GALLERY_PAGE_RE = re.compile(r"^/g/([0-9]+)/?$")
 GALLERY_READER_RE = re.compile(r"^/g/([0-9]+)/([0-9]+)/?$")
+LOCAL_GALLERY_PAGE_RE = re.compile(r"^/downloads/g/([0-9]+)/?$")
+LOCAL_GALLERY_READER_RE = re.compile(r"^/downloads/g/([0-9]+)/([0-9]+)/?$")
+LOCAL_TAXONOMY_RE = re.compile(
+    r"^/downloads/(tag|artist|character|parody|group|language|category)/([^/]+)/?$"
+)
 MEDIA_RE = re.compile(r"^/media/([0-9]+)/([^/]+)$")
 PREVIEW_MEDIA_RE = re.compile(r"^/preview-media/([0-9]+)/([0-9]+)$")
+PREVIEW_THUMB_RE = re.compile(r"^/preview-thumbnail/([0-9]+)/([0-9]+)$")
 LOCAL_API_PREFIX = "/_nh-local/api"
 LOCAL_ASSET_PREFIX = "/_nh-local/assets"
 MAX_JSON_BODY_BYTES = 64 * 1024
@@ -250,6 +261,8 @@ class DownloadManager:
         self.lock = threading.RLock()
         self.queue: queue.Queue[Job] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self.archive_ready_callback = None
+        self.gallery_deleted_callback = None
         if autostart:
             self.start()
 
@@ -276,6 +289,11 @@ class DownloadManager:
                 job.status = "succeeded"
                 job.finished_at = time.time()
                 job.logs.append(f"{archive_path.name} already exists")
+                if self.archive_ready_callback is not None:
+                    try:
+                        self.archive_ready_callback(archive_path)
+                    except Exception as exc:
+                        job.logs.append(f"Metadata pending: {exc}")
                 self.jobs[job.job_id] = job
                 self.active_by_gallery_id[gallery_id] = job.job_id
                 self.recent_job_ids.appendleft(job.job_id)
@@ -365,6 +383,8 @@ class DownloadManager:
                 elif path.exists():
                     path.unlink()
                     deleted_paths.append(str(path))
+            if self.gallery_deleted_callback is not None:
+                self.gallery_deleted_callback(gallery_id)
 
         with self.lock:
             if self.active_by_gallery_id.get(gallery_id) == job_id:
@@ -501,6 +521,11 @@ class DownloadManager:
             os.replace(temp_archive, archive)
             shutil.rmtree(folder)
             self._append_log(job, f"Created {archive}")
+            if self.archive_ready_callback is not None:
+                try:
+                    self.archive_ready_callback(archive)
+                except Exception as exc:  # Metadata repair is independent from the completed download.
+                    self._append_log(job, f"Metadata pending: {exc}")
         except Exception:
             temp_archive.unlink(missing_ok=True)
             raise
@@ -780,6 +805,7 @@ class LocalLibrary:
         env: dict[str, str] | None = None,
         cache_settings: CacheSettings | None = None,
         cache_autostart: bool = True,
+        index_autostart: bool | None = None,
     ) -> None:
         self.manager = manager
         self.env = dict(env or os.environ)
@@ -794,6 +820,32 @@ class LocalLibrary:
         self._catalog_lock = threading.Lock()
         self._last_random_ids: tuple[str, ...] = ()
         self._random_lock = threading.Lock()
+        self.database = LibraryDatabase(manager.storage_dir)
+        self.indexer = LibraryIndexer(
+            self.database,
+            self._fetch_index_metadata,
+            autostart=cache_autostart if index_autostart is None else index_autostart,
+        )
+        self.manager.archive_ready_callback = self._archive_ready
+        self.manager.gallery_deleted_callback = self.database.delete_gallery
+
+    def _archive_ready(self, archive: Path) -> None:
+        status = self.database.index_archive(archive)
+        if status == "pending":
+            self.indexer.wake()
+
+    def _fetch_index_metadata(self, gallery_id: str) -> dict[str, object]:
+        response = self.public_api_response(f"/api/v2/galleries/{gallery_id}")
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(f"upstream metadata returned HTTP {response.status}")
+        metadata = json.loads(response.data)
+        if not isinstance(metadata, dict) or str(metadata.get("id")) != gallery_id:
+            raise ValueError("upstream gallery metadata is invalid")
+        return metadata
+
+    def _index_for_synchronous_use(self) -> None:
+        if self.indexer.worker is None:
+            self.indexer.index_now(repair_remote=False)
 
     def gallery_html(self, gallery_id: str) -> str:
         cache_path = self.manager.local_html_dir(gallery_id) / "cover_page.html"
@@ -807,11 +859,72 @@ class LocalLibrary:
         self._cache_metadata(gallery_id, source)
         return self.rewrite_html(source, stale=stale)
 
+    def local_gallery_html(self, gallery_id: str) -> str | None:
+        self._index_for_synchronous_use()
+        record = self.database.gallery(gallery_id)
+        if record is None or not self.manager.archive_path(gallery_id).exists():
+            return None
+        images = self._gallery_images(gallery_id)
+        cover = (
+            f'<img class="nh-local-gallery-cover" src="/media/{gallery_id}/{quote(images[0].name)}" '
+            f'alt="{html.escape(str(record["title"]))}">' if images else
+            '<div class="nh-catalog-placeholder">No cover</div>'
+        )
+        groups: dict[str, list[str]] = {kind: [] for kind in GALLERY_TYPES}
+        for tag in record.get("tags", []):
+            if not isinstance(tag, dict) or str(tag.get("type")) not in groups:
+                continue
+            kind = str(tag["type"])
+            upstream = str(tag.get("upstream_url") or f'/{kind}/{tag.get("slug", "")}/')
+            local = f'/downloads/{kind}/{quote(str(tag.get("slug") or ""))}/'
+            local_count = int(tag.get("local_count") or 0)
+            groups[kind].append(
+                f'<a class="nh-taxonomy-link" data-upstream-href="{html.escape(upstream)}" '
+                f'data-local-href="{html.escape(local)}" href="{html.escape(local)}">'
+                f'{html.escape(str(tag.get("name") or ""))}<span class="nh-taxonomy-count">{local_count}</span></a>'
+            )
+        rows = "".join(
+            f'<div class="nh-local-tag-row"><strong>{kind.title()}:</strong><div>{"".join(items)}</div></div>'
+            for kind, items in groups.items() if items
+        )
+        pending = (
+            '<p class="nh-local-index-pending">Metadata indexing is still pending; some fields may be missing.</p>'
+            if record.get("metadata_status") == "pending" else ""
+        )
+        preview_cards = ""
+        try:
+            metadata = self._detail_preview_metadata(gallery_id)
+            pages = metadata.get("pages") if isinstance(metadata.get("pages"), list) else []
+            preview_cards = "".join(
+                f'<a class="nh-content-thumbnail" href="/downloads/g/{gallery_id}/{number}/">'
+                f'<img loading="lazy" src="/preview-thumbnail/{gallery_id}/{number}" alt="Page {number}"></a>'
+                for item in pages if isinstance(item, dict)
+                for number in [item.get("number")]
+                if isinstance(number, int) and number > 0
+            )
+        except Exception as exc:  # Keep the downloaded gallery usable when upstream preview metadata is unavailable.
+            print(f"preview thumbnails unavailable for {gallery_id}: {exc}")
+        title = html.escape(str(record["title"]))
+        return (
+            '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>{title}</title><link rel="stylesheet" href="/_nh-local/assets/local.css">'
+            '<script defer src="/_nh-local/assets/local.js"></script></head><body class="nh-catalog-body">'
+            f'{self._local_menu_html()}{self._catalog_site_header_html()}'
+            '<main class="nh-local-gallery-page"><section class="nh-local-gallery-panel">'
+            f'<div class="nh-local-gallery-cover-wrap">{cover}</div><div id="info" class="nh-local-gallery-info">'
+            f'<h1>{title}</h1><p class="nh-local-gallery-id">#{gallery_id}</p>{pending}'
+            '<div class="nh-taxonomy-mode"><span>Tag links:</span><button type="button" data-nh-taxonomy-toggle>Local</button></div>'
+            f'<div class="nh-local-tags">{rows}</div><p><a class="nh-local-reader-button" href="/downloads/g/{gallery_id}/1/">Read locally</a></p>'
+            '</div></section>'
+            f'<section class="nh-content-preview"><h2>Preview</h2><div class="nh-content-preview-grid">{preview_cards}</div></section>'
+            '</main></body></html>'
+        )
+
     def reader_html(self, gallery_id: str, page: str) -> str:
         if self.manager.archive_path(gallery_id).exists():
             images = self._gallery_images(gallery_id)
             local_image = next((path for path in images if path.stem == page), None)
-            return self._local_reader_html(gallery_id, page, images, local_image)
+            return self._local_reader_html(gallery_id, page, images, local_image, local=False)
         try:
             metadata = self._preview_metadata(gallery_id)
             pages = metadata.get("pages", [])
@@ -825,26 +938,62 @@ class LocalLibrary:
         except Exception as exc:
             return self._preview_unavailable_html(gallery_id, str(exc))
 
+    def local_reader_html(self, gallery_id: str, page: str) -> str | None:
+        if not self.manager.archive_path(gallery_id).exists():
+            return None
+        images = self._gallery_images(gallery_id)
+        local_image = next((path for path in images if path.stem == page), None)
+        return self._local_reader_html(gallery_id, page, images, local_image, local=True)
+
     def downloaded_galleries_html(self, page: int) -> str:
-        archives = self._downloaded_archives()
-        page_count = max(1, (len(archives) + 24) // 25)
+        self._index_for_synchronous_use()
+        records, total = self.database.downloaded(page=page)
+        page_count = max(1, (total + 24) // 25)
         page = max(1, min(page, page_count))
-        selected = archives[(page - 1) * 25:page * 25]
-        records = [self._archive_catalog_record(path) for path in selected]
-        return self._catalog_page_html("Recently Downloaded", records, page=page, page_count=page_count)
+        if page > 1 and not records:
+            records, _total = self.database.downloaded(page=page)
+        return self._catalog_page_html(
+            "Recently Downloaded", records, page=page, page_count=page_count,
+            base_path="/downloads/", show_page_jump=True,
+        )
 
     def random_downloaded_html(self) -> str:
-        archives = self._downloaded_archives()
-        sample_size = min(5, len(archives))
+        self._index_for_synchronous_use()
+        records = self.database.random(5)
         with self._random_lock:
-            selected = random.sample(archives, sample_size)
-            if len(archives) > sample_size and tuple(path.stem for path in selected) == self._last_random_ids:
-                alternatives = [path for path in archives if path not in selected]
-                selected[-1] = random.choice(alternatives)
-                random.shuffle(selected)
-            self._last_random_ids = tuple(path.stem for path in selected)
-        records = [self._archive_catalog_record(path) for path in selected]
+            current_ids = tuple(str(record["id"]) for record in records)
+            if current_ids == self._last_random_ids and len(records) == 5:
+                records = self.database.random(5)
+                current_ids = tuple(str(record["id"]) for record in records)
+            self._last_random_ids = current_ids
         return self._catalog_page_html("Random 5 Downloads", records)
+
+    def local_search_html(self, query: str, page: int) -> str:
+        self._index_for_synchronous_use()
+        requested_page = page
+        records, total = self.database.search(query, page=requested_page)
+        page_count = max(1, (total + 24) // 25)
+        page = max(1, min(requested_page, page_count))
+        if page != requested_page:
+            records, _total = self.database.search(query, page=page)
+        title = f'Search: "{query}"' if query else "All Downloads"
+        base = f"/downloads/search/?q={quote(query)}"
+        return self._catalog_page_html(title, records, page=page, page_count=page_count, base_path=base, search_query=query)
+
+    def local_taxonomy_html(self, taxonomy_type: str, slug: str, page: int) -> str | None:
+        self._index_for_synchronous_use()
+        requested_page = page
+        name, records, total = self.database.taxonomy(taxonomy_type, slug, page=requested_page)
+        if name is None:
+            return None
+        page_count = max(1, (total + 24) // 25)
+        page = max(1, min(requested_page, page_count))
+        if page != requested_page:
+            name, records, total = self.database.taxonomy(taxonomy_type, slug, page=page)
+        return self._catalog_page_html(
+            f"{taxonomy_type.title()}: {name}", records, page=page, page_count=page_count,
+            base_path=f"/downloads/{taxonomy_type}/{quote(slug)}/",
+        )
 
     def preview_media_path(self, gallery_id: str, page: str) -> Path | None:
         if self.manager.archive_path(gallery_id).exists():
@@ -874,6 +1023,44 @@ class LocalLibrary:
                 target.touch()
                 return target
             data = self._fetch_cdn_image(remote_path, page_number)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            temp.write_bytes(data)
+            os.replace(temp, target)
+        self.cache.cleanup()
+        return target
+
+    def preview_thumbnail_path(self, gallery_id: str, page: str) -> Path | None:
+        metadata = self._detail_preview_metadata(gallery_id)
+        pages = metadata.get("pages")
+        if not isinstance(pages, list):
+            return None
+        page_number = int(page)
+        if page_number < 1 or page_number > len(pages) or not isinstance(pages[page_number - 1], dict):
+            return None
+        item = pages[page_number - 1]
+        remote_path = item.get("thumbnail")
+        if not isinstance(remote_path, str) or not remote_path.startswith("galleries/"):
+            full_path = item.get("path")
+            if not isinstance(full_path, str) or not full_path.startswith("galleries/"):
+                return None
+            full = Path(full_path)
+            remote_path = f"{full.parent.as_posix()}/{full.stem}t{full.suffix}"
+        suffix = Path(remote_path).suffix.lower()
+        if suffix not in IMAGE_SUFFIXES:
+            return None
+        target = self.manager.local_preview_dir(gallery_id) / "thumbnails" / f"{page_number}{suffix}"
+        try:
+            if target.is_file():
+                target.touch()
+                return target
+        except FileNotFoundError:
+            pass
+        with self.manager.gallery_lock(f"preview-thumbnail-{gallery_id}-{page_number}"):
+            if target.is_file():
+                target.touch()
+                return target
+            data = self._fetch_cdn_thumbnail(remote_path, page_number)
             target.parent.mkdir(parents=True, exist_ok=True)
             temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
             temp.write_bytes(data)
@@ -1069,12 +1256,8 @@ class LocalLibrary:
         return suffix in {"", ".html"}
 
     def _cache_metadata(self, gallery_id: str, source: str) -> None:
-        match = WINDOW_GALLERY_RE.search(source)
-        if not match:
-            return
-        try:
-            metadata = json.loads(json.loads(match.group("value")))
-        except json.JSONDecodeError:
+        metadata = parse_gallery_metadata(source, gallery_id)
+        if metadata is None:
             return
         path = self.manager.local_metadata_path(gallery_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1105,7 +1288,37 @@ class LocalLibrary:
         self.cache.cleanup()
         return metadata
 
+    def _detail_preview_metadata(self, gallery_id: str) -> dict[str, object]:
+        source = self._archive_cover_html(gallery_id) or ""
+        metadata = parse_gallery_metadata(source, gallery_id)
+        if isinstance(metadata, dict) and isinstance(metadata.get("pages"), list):
+            return metadata
+        if isinstance(metadata, dict):
+            images = metadata.get("images")
+            legacy_pages = images.get("pages") if isinstance(images, dict) else None
+            media_id = str(metadata.get("media_id") or "")
+            if isinstance(legacy_pages, list) and media_id.isdigit():
+                extensions = {"j": ".jpg", "p": ".png", "g": ".gif", "w": ".webp"}
+                pages = []
+                for number, item in enumerate(legacy_pages, 1):
+                    if not isinstance(item, dict) or item.get("t") not in extensions:
+                        continue
+                    suffix = extensions[str(item["t"])]
+                    pages.append({
+                        "number": number,
+                        "thumbnail": f"galleries/{media_id}/{number}t{suffix}",
+                    })
+                if pages:
+                    return {**metadata, "pages": pages}
+        return self._preview_metadata(gallery_id)
+
     def _fetch_cdn_image(self, remote_path: str, page_number: int) -> bytes:
+        return self._fetch_cdn_asset(remote_path, page_number, subdomain="i", max_bytes=100 * 1024 * 1024)
+
+    def _fetch_cdn_thumbnail(self, remote_path: str, page_number: int) -> bytes:
+        return self._fetch_cdn_asset(remote_path, page_number, subdomain="t", max_bytes=20 * 1024 * 1024)
+
+    def _fetch_cdn_asset(self, remote_path: str, page_number: int, *, subdomain: str, max_bytes: int) -> bytes:
         configured = self.env.get("NH_MEDIA_SERVER_LIST", "1 2 3 4 5 6 7 8 9").split()
         servers = [item for item in configured if item.isdigit() and 1 <= int(item) <= 9]
         if not servers:
@@ -1118,18 +1331,18 @@ class LocalLibrary:
         last_error: Exception | None = None
         safe_path = quote(remote_path.lstrip("/"), safe="/._-")
         for server in servers:
-            request = Request(f"https://i{server}.nhentai.net/{safe_path}", headers=headers)
+            request = Request(f"https://{subdomain}{server}.nhentai.net/{safe_path}", headers=headers)
             try:
                 with urlopen(request, timeout=20) as response:  # noqa: S310 - validated nhentai CDN host.
                     final = urlparse(response.geturl())
-                    if final.scheme != "https" or not re.fullmatch(r"i[1-9]\.nhentai\.net", final.hostname or ""):
+                    if final.scheme != "https" or not re.fullmatch(rf"{subdomain}[1-9]\.nhentai\.net", final.hostname or ""):
                         raise PermissionError("image CDN redirected outside nhentai.net")
                     content_type = response.headers.get("Content-Type", "").lower()
                     if not content_type.startswith("image/"):
                         raise ValueError("preview response is not an image")
-                    data = response.read(100 * 1024 * 1024 + 1)
-                    if len(data) > 100 * 1024 * 1024:
-                        raise ValueError("preview image exceeds 100 MiB")
+                    data = response.read(max_bytes + 1)
+                    if len(data) > max_bytes:
+                        raise ValueError("preview image exceeds size limit")
                     return data
             except Exception as exc:  # noqa: BLE001 - retry the configured CDN mirrors.
                 last_error = exc
@@ -1237,6 +1450,9 @@ class LocalLibrary:
         *,
         page: int | None = None,
         page_count: int | None = None,
+        base_path: str = "/downloads/",
+        search_query: str = "",
+        show_page_jump: bool = False,
     ) -> str:
         cards = []
         for record in records:
@@ -1245,34 +1461,44 @@ class LocalLibrary:
             cover_url = html.escape(str(record.get("cover_url") or ""))
             image = f'<img loading="lazy" src="{cover_url}" alt="{gallery_title}">' if cover_url else '<div class="nh-catalog-placeholder">No cover</div>'
             cards.append(
-                f'<div class="gallery"><a class="cover" href="/g/{gallery_id}/">{image}'
+                f'<div class="gallery"><a class="cover" href="/downloads/g/{gallery_id}/">{image}'
                 f'<div class="caption">{gallery_title}</div></a></div>'
             )
+        if not cards:
+            cards.append('<p class="nh-catalog-empty">No downloaded galleries found.</p>')
         pagination = ""
         if page is not None and page_count is not None:
             links = []
+            separator = "&amp;" if "?" in base_path else "?"
             if page > 1:
-                links.append(f'<a href="/downloads/?page={page - 1}">Prev</a>')
+                links.append(f'<a href="{html.escape(base_path)}{separator}page={page - 1}">Prev</a>')
             links.append(f"<span>Page {page} / {page_count}</span>")
             if page < page_count:
-                links.append(f'<a href="/downloads/?page={page + 1}">Next</a>')
+                links.append(f'<a href="{html.escape(base_path)}{separator}page={page + 1}">Next</a>')
+            if show_page_jump:
+                links.append(
+                    f'<form class="nh-page-jump" action="{html.escape(base_path)}" method="get">'
+                    f'<label>Page <input type="number" name="page" min="1" max="{page_count}" '
+                    f'value="{page}" inputmode="numeric" aria-label="Page number"></label>'
+                    '<button type="submit">Go</button></form>'
+                )
             pagination = f'<nav class="nh-catalog-pagination">{"".join(links)}</nav>'
         return (
             "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
             f"<title>{html.escape(title)}</title>"
             '<link rel="stylesheet" href="/_nh-local/assets/local.css"><script defer src="/_nh-local/assets/local.js"></script>'
             "</head><body class=\"nh-catalog-body\">"
-            f"{self._local_menu_html()}{self._catalog_site_header_html()}"
+            f"{self._local_menu_html()}{self._catalog_site_header_html(search_query)}"
             f'<main class="nh-catalog-page"><section class="nh-catalog-panel"><h1><span aria-hidden="true">▰</span> {html.escape(title)}</h1>'
             f'<div class="nh-catalog-grid">{"".join(cards)}</div>{pagination}</section></main></body></html>'
         )
 
-    def _catalog_site_header_html(self) -> str:
+    def _catalog_site_header_html(self, query: str = "") -> str:
         return (
             '<header class="nh-catalog-site-header"><a class="nh-catalog-logo" href="/" aria-label="Home">'
             '<img src="/logo.svg" alt="nhentai"></a>'
-            '<form class="nh-catalog-search" action="/search/" method="get">'
-            '<input type="search" name="q" aria-label="Search" autocomplete="off">'
+            '<form class="nh-catalog-search" action="/downloads/search/" method="get">'
+            f'<input type="search" name="q" value="{html.escape(query)}" aria-label="Search local downloads" autocomplete="off">'
             '<button type="submit" aria-label="Search">⌕</button></form>'
             '<nav class="nh-catalog-primary-nav"><a href="/random/">Random</a><a href="/tags/">Tags</a>'
             '<a href="/artists/">Artists</a><a href="/characters/">Characters</a>'
@@ -1367,14 +1593,19 @@ class LocalLibrary:
             f"<p><a href=\"/g/{gallery_id}/\">Back to gallery</a></p></main></body></html>"
         )
 
-    def _local_reader_html(self, gallery_id: str, page: str, images: list[Path], image_path: Path | None) -> str:
+    def _local_reader_html(
+        self, gallery_id: str, page: str, images: list[Path], image_path: Path | None, *, local: bool
+    ) -> str:
         image_src = f"/media/{gallery_id}/{quote(image_path.name)}" if image_path else None
         page_count = len(images)
         page_number = int(page)
         next_page = min(page_number + 1, page_count or page_number + 1)
         next_image = next((path for path in images if path.stem == str(next_page)), None)
         next_src = f"/media/{gallery_id}/{quote(next_image.name)}" if next_image and next_page != page_number else None
-        return self._reader_shell_html(gallery_id, page_number, page_count, image_src, next_src, preview=False)
+        return self._reader_shell_html(
+            gallery_id, page_number, page_count, image_src, next_src, preview=False,
+            route_prefix="/downloads/g" if local else "/g",
+        )
 
     def _reader_shell_html(
         self,
@@ -1385,6 +1616,7 @@ class LocalLibrary:
         next_image_src: str | None,
         *,
         preview: bool,
+        route_prefix: str = "/g",
     ) -> str:
         title = f"Gallery {gallery_id} - page {page_number}"
         next_page = min(page_number + 1, page_count or page_number + 1)
@@ -1399,12 +1631,12 @@ class LocalLibrary:
             "nav{position:sticky;top:0;z-index:2;padding:12px;background:#111e}a{color:#8cc8ff;margin:0 12px}"
             "img{display:block;max-width:100%;height:auto;margin:auto}.nh-preview-label{color:#f5b942;margin-left:12px}</style>"
             "</head><body>"
-            f"{self._local_menu_html()}<nav><a href=\"/g/{gallery_id}/\">Gallery</a><a href=\"/g/{gallery_id}/{prev_page}/\">Prev</a>"
-            f"<span>{page_number} / {page_count}</span>{preview_label}<a href=\"/g/{gallery_id}/{next_page}/\">Next</a></nav>"
-            f'<a href="/g/{gallery_id}/{next_page}/" aria-label="Next page">{image}</a>'
+            f"{self._local_menu_html()}<nav><a href=\"{route_prefix}/{gallery_id}/\">Gallery</a><a href=\"{route_prefix}/{gallery_id}/{prev_page}/\">Prev</a>"
+            f"<span>{page_number} / {page_count}</span>{preview_label}<a href=\"{route_prefix}/{gallery_id}/{next_page}/\">Next</a></nav>"
+            f'<a href="{route_prefix}/{gallery_id}/{next_page}/" aria-label="Next page">{image}</a>'
             "<script>document.addEventListener('keydown',function(e){"
-            f"if(e.key==='ArrowLeft')location.href='/g/{gallery_id}/{prev_page}/';"
-            f"if(e.key==='ArrowRight')location.href='/g/{gallery_id}/{next_page}/';"
+            f"if(e.key==='ArrowLeft')location.href='{route_prefix}/{gallery_id}/{prev_page}/';"
+            f"if(e.key==='ArrowRight')location.href='{route_prefix}/{gallery_id}/{next_page}/';"
             "});</script></body></html>"
         )
 
@@ -1550,7 +1782,10 @@ def make_handler(
             self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def log_message(self, fmt: str, *args: object) -> None:
             print(f"{self.address_string()} - {fmt % args}")
@@ -1623,6 +1858,50 @@ def make_library_handler(
             if path.rstrip("/") == "/downloads/random":
                 self._send_html(library.random_downloaded_html(), extra_headers={"Cache-Control": "no-store"})
                 return
+            if path.rstrip("/") == "/downloads/search":
+                params = parse_qs(parsed.query)
+                try:
+                    page = max(1, int(params.get("page", ["1"])[0]))
+                except ValueError:
+                    page = 1
+                self._send_html(
+                    library.local_search_html(params.get("q", [""])[0], page),
+                    extra_headers={"Cache-Control": "no-cache"},
+                )
+                return
+
+            local_taxonomy_match = LOCAL_TAXONOMY_RE.fullmatch(path)
+            if local_taxonomy_match:
+                try:
+                    page = max(1, int(parse_qs(parsed.query).get("page", ["1"])[0]))
+                except ValueError:
+                    page = 1
+                rendered = library.local_taxonomy_html(
+                    local_taxonomy_match.group(1), unquote(local_taxonomy_match.group(2)), page
+                )
+                if rendered is None:
+                    self._send_text("not found", status=HTTPStatus.NOT_FOUND)
+                else:
+                    self._send_html(rendered, extra_headers={"Cache-Control": "no-cache"})
+                return
+
+            local_gallery_match = LOCAL_GALLERY_PAGE_RE.fullmatch(path)
+            if local_gallery_match:
+                rendered = library.local_gallery_html(local_gallery_match.group(1))
+                if rendered is None:
+                    self._send_text("not found", status=HTTPStatus.NOT_FOUND)
+                else:
+                    self._send_html(rendered, extra_headers={"Cache-Control": "no-cache"})
+                return
+
+            local_reader_match = LOCAL_GALLERY_READER_RE.fullmatch(path)
+            if local_reader_match:
+                rendered = library.local_reader_html(*local_reader_match.groups())
+                if rendered is None:
+                    self._send_text("not found", status=HTTPStatus.NOT_FOUND)
+                else:
+                    self._send_html(rendered, extra_headers={"Cache-Control": "no-cache"})
+                return
 
             media_match = MEDIA_RE.fullmatch(path)
             if media_match:
@@ -1646,6 +1925,20 @@ def make_library_handler(
                     self._send_text("not found", status=HTTPStatus.NOT_FOUND)
                     return
                 self._send_file(preview_path, cache_control="private, max-age=3600")
+                return
+
+            thumbnail_match = PREVIEW_THUMB_RE.fullmatch(path)
+            if thumbnail_match:
+                gallery_id, page = thumbnail_match.groups()
+                try:
+                    thumbnail_path = library.preview_thumbnail_path(gallery_id, page)
+                except Exception as exc:  # noqa: BLE001 - report upstream thumbnail failures.
+                    self._send_text(f"preview thumbnail fetch failed: {exc}", status=HTTPStatus.BAD_GATEWAY)
+                    return
+                if thumbnail_path is None:
+                    self._send_text("not found", status=HTTPStatus.NOT_FOUND)
+                    return
+                self._send_file(thumbnail_path, cache_control="private, max-age=86400")
                 return
 
             gallery_match = GALLERY_PAGE_RE.fullmatch(path)
@@ -1793,7 +2086,10 @@ def make_library_handler(
                     "font-src 'self' https://cdnjs.cloudflare.com; connect-src 'self'; frame-src 'none'; object-src 'none'",
                 )
             self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def log_message(self, fmt: str, *args: object) -> None:
             print(f"{self.address_string()} - {fmt % args}")
@@ -1818,6 +2114,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preview-cache-max-age", type=int, help="remove temporary preview files unused for this many seconds")
     parser.add_argument("--preview-cache-max-bytes", type=int, help="maximum temporary preview cache size")
     parser.add_argument("--cache-sweep-interval", type=int, help="background cache cleanup interval in seconds")
+    parser.add_argument(
+        "--reindex-library",
+        action="store_true",
+        help="reconcile all CBZ metadata with SQLite, repair missing metadata, then exit",
+    )
+    parser.add_argument(
+        "--refresh-gallery",
+        metavar="ID",
+        help="force an upstream metadata refresh for one downloaded gallery, then exit",
+    )
     parser.add_argument(
         "--allowed-network",
         action="append",
@@ -1847,15 +2153,34 @@ def main() -> None:
         if value is not None:
             env[name] = str(value)
 
+    maintenance_mode = args.reindex_library or args.refresh_gallery is not None
     manager = DownloadManager(
         project_root=PROJECT_ROOT,
         script_path=Path(args.download_script),
         storage_dir=expand_path(env.get("NH_FOLDER_PATH", str(Path.home() / "nh"))),
         env=env,
+        autostart=not maintenance_mode,
     )
     networks = parse_networks(args.allowed_networks or DEFAULT_ALLOWED_NETWORKS)
+    library = LocalLibrary(
+        manager, env=env, cache_autostart=not maintenance_mode, index_autostart=not maintenance_mode
+    )
+    if maintenance_mode:
+        if args.reindex_library:
+            library.indexer.index_now(repair_remote=True)
+            print(f"library index rebuilt at {library.database.path}")
+        if args.refresh_gallery is not None:
+            gallery_id = args.refresh_gallery
+            if not is_valid_gallery_id(gallery_id):
+                raise SystemExit("--refresh-gallery ID must contain digits only")
+            archive = manager.archive_path(gallery_id)
+            if not archive.exists():
+                raise SystemExit(f"downloaded archive not found: {archive}")
+            metadata = library._fetch_index_metadata(gallery_id)
+            library.database.index_archive(archive, metadata=metadata, source_name="upstream")
+            print(f"refreshed metadata for {gallery_id}")
+        return
     handler = make_handler(manager, networks)
-    library = LocalLibrary(manager, env=env)
     library_handler = make_library_handler(library, networks)
 
     httpd = ThreadingHTTPServer((args.host, args.port), handler)

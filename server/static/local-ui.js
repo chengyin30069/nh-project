@@ -2,7 +2,9 @@
   "use strict";
 
   const API = "/_nh-local/api";
-  const GALLERY_PATH_RE = /^\/g\/([0-9]+)\/?$/;
+  const GALLERY_PATH_RE = /^(?:\/downloads)?\/g\/([0-9]+)\/?$/;
+  const TAXONOMY_PATH_RE = /^\/(tag|artist|character|parody|group|language|category)\/([^/]+)\/?$/;
+  const TAXONOMY_MODE_KEY = "nh-taxonomy-link-mode";
   const URL_CHECK_INTERVAL_MS = 250;
   const RENDER_RETRY_DELAYS_MS = [0, 300, 900, 1800];
 
@@ -137,6 +139,14 @@
       try {
         await request(`/galleries/${galleryId}`, { method: "DELETE" });
         hideDeleteModal();
+        if (window.location.pathname.startsWith("/downloads/g/")) {
+          window.location.assign("/downloads/");
+          return;
+        }
+        if (window.location.pathname.startsWith("/downloads/")) {
+          window.location.reload();
+          return;
+        }
         scheduleRenderForCurrentUrl();
       } catch (error) {
         const message = modal.querySelector(".nh-delete-error");
@@ -286,8 +296,58 @@
     document.querySelectorAll('a[href^="/login"],a[href^="/register"],a[href^="/favorites"],a[href^="/user/"],form[action*="/comments"],button[aria-label*="favorite" i],button[aria-label*="vote" i],button[aria-label*="suggest" i]').forEach((element) => element.remove());
   }
 
+  function applyTaxonomyMode(mode) {
+    const local = mode === "local";
+    document.querySelectorAll("[data-upstream-href][data-local-href]").forEach((link) => {
+      link.setAttribute("href", local ? link.dataset.localHref : link.dataset.upstreamHref);
+    });
+    document.querySelectorAll("[data-nh-taxonomy-toggle]").forEach((button) => {
+      button.textContent = local ? "Local" : "nhentai";
+      button.dataset.mode = local ? "local" : "upstream";
+      button.title = local ? "Taxonomy links search downloaded galleries" : "Taxonomy links follow nhentai";
+    });
+  }
+
+  function setupTaxonomyToggle() {
+    if (!window.location.pathname.match(GALLERY_PATH_RE)) return;
+    const localGallery = window.location.pathname.startsWith("/downloads/g/");
+    const storageKey = `${TAXONOMY_MODE_KEY}:${localGallery ? "downloads" : "proxy"}`;
+    const defaultMode = localGallery ? "local" : "upstream";
+    for (const link of document.querySelectorAll("a[href]")) {
+      let url;
+      try { url = new URL(link.getAttribute("href"), window.location.origin); } catch { continue; }
+      if (url.origin !== window.location.origin) continue;
+      const match = url.pathname.match(TAXONOMY_PATH_RE);
+      if (!match) continue;
+      link.dataset.upstreamHref = `${url.pathname}${url.search}${url.hash}`;
+      link.dataset.localHref = `/downloads/${match[1]}/${match[2]}/`;
+      link.classList.add("nh-taxonomy-link");
+    }
+    let button = document.querySelector("[data-nh-taxonomy-toggle]");
+    if (!button && document.querySelector("[data-upstream-href][data-local-href]")) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "nh-taxonomy-mode";
+      wrapper.innerHTML = '<span>Tag links:</span><button type="button" data-nh-taxonomy-toggle></button>';
+      button = wrapper.querySelector("button");
+      const target = document.querySelector("#tags") || document.querySelector("#info") || document.body;
+      target.insertAdjacentElement("afterbegin", wrapper);
+    }
+    if (!button) return;
+    if (!button.dataset.bound) {
+      button.dataset.bound = "true";
+      button.addEventListener("click", () => {
+        const next = button.dataset.mode === "local" ? "upstream" : "local";
+        window.sessionStorage.setItem(storageKey, next);
+        applyTaxonomyMode(next);
+      });
+    }
+    const storedMode = window.sessionStorage.getItem(storageKey);
+    applyTaxonomyMode(storedMode === "local" || storedMode === "upstream" ? storedMode : defaultMode);
+  }
+
   function renderCurrentPage(version) {
     removeUnsupportedUi();
+    setupTaxonomyToggle();
     addGalleryPageButton(version);
     renderThumbnailControls(version);
   }

@@ -5,15 +5,15 @@ const uiScript = await Deno.readTextFile(new URL("../../server/static/local-ui.j
 const uiStyle = await Deno.readTextFile(new URL("../../server/static/local-ui.css", import.meta.url));
 
 function fixtureHtml(pathname: string): string {
-  const detail = pathname.startsWith("/g/");
+  const detail = /^(?:\/downloads)?\/g\//.test(pathname);
   const content = detail
-    ? '<main id="info"><h1>Fixture Detail</h1><a class="btn" href="/download">Download</a></main>'
+    ? '<main id="info"><h1>Fixture Detail</h1><a class="btn" href="/download">Download</a><div id="tags"><a href="/artist/alice/">Alice</a></div></main>'
     : `<main><div class="gallery-grid">
         <div class="gallery"><a class="cover" href="/g/123456/"><img alt="Downloaded fixture"><div class="caption">Downloaded fixture</div></a></div>
         <div class="gallery"><a class="cover" href="/g/654321/"><img alt="Remote fixture"><div class="caption">Remote fixture</div></a></div>
       </div></main>`;
   const hydrated = detail
-    ? '<h1>Fixture Detail</h1><a class="btn" href="/download">Download</a><button aria-label="Favorite gallery">Favorite</button>'
+    ? '<h1>Fixture Detail</h1><a class="btn" href="/download">Download</a><div id="tags"><a href="/artist/alice/">Alice</a></div><button aria-label="Favorite gallery">Favorite</button>'
     : `<div class="gallery-grid">
         <div class="gallery"><a class="cover" href="/g/123456/"><img alt="Downloaded fixture"><div class="caption">Downloaded fixture</div></a></div>
         <div class="gallery"><a class="cover" href="/g/654321/"><img alt="Remote fixture"><div class="caption">Remote fixture</div></a></div>
@@ -82,6 +82,31 @@ Deno.test("controls survive hydration and match extension behavior", async () =>
     assertEquals(await page.locator("#nh-downloader-button").count(), 1);
     assertEquals(await page.locator("#nh-downloader-button").textContent(), "Download");
     assertEquals(await page.locator('button[aria-label*="Favorite" i]').count(), 0);
+    const taxonomyToggle = page.locator("[data-nh-taxonomy-toggle]");
+    assertEquals(await taxonomyToggle.textContent(), "nhentai");
+    assertEquals(await page.locator("#tags a").getAttribute("href"), "/artist/alice/");
+    await taxonomyToggle.click();
+    assertEquals(await page.locator("#tags a").getAttribute("href"), "/downloads/artist/alice/");
+    await page.reload();
+    await page.waitForTimeout(2100);
+    assertEquals(await page.locator("[data-nh-taxonomy-toggle]").textContent(), "Local");
+    await page.locator("[data-nh-taxonomy-toggle]").click();
+    assertEquals(await page.locator("[data-nh-taxonomy-toggle]").textContent(), "nhentai");
+
+    await page.goto(`http://127.0.0.1:${port}/downloads/g/654321/`);
+    await page.waitForTimeout(2100);
+    assertEquals(await page.locator("[data-nh-taxonomy-toggle]").textContent(), "Local");
+    assertEquals(await page.locator("#tags a").getAttribute("href"), "/downloads/artist/alice/");
+    await page.locator("[data-nh-taxonomy-toggle]").click();
+    await page.reload();
+    await page.waitForTimeout(2100);
+    assertEquals(await page.locator("[data-nh-taxonomy-toggle]").textContent(), "nhentai");
+
+    const freshTab = await browser.newPage();
+    await freshTab.goto(`http://127.0.0.1:${port}/g/654321/`);
+    await freshTab.waitForTimeout(2100);
+    assertEquals(await freshTab.locator("[data-nh-taxonomy-toggle]").textContent(), "nhentai");
+    await freshTab.close();
   } finally {
     await browser.close();
     abort.abort();

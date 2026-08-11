@@ -687,6 +687,8 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertIn("Title 100027", first)
             self.assertIn("nh-catalog-site-header", first)
             self.assertNotIn("Title 100001", first)
+            self.assertIn('class="nh-page-jump"', first)
+            self.assertIn('name="page" min="1" max="2" value="1"', first)
             self.assertEqual(second.count('class="gallery"'), 2)
             self.assertIn("Title 100001", second)
             self.assertIn("Page 2 / 2", second)
@@ -704,9 +706,9 @@ class LocalLibraryTests(unittest.TestCase):
             refreshed = library.random_downloaded_html()
 
             self.assertEqual(rendered.count('class="gallery"'), 5)
-            ids = re.findall(r'href="/g/([0-9]+)/"', rendered)
+            ids = re.findall(r'href="/downloads/g/([0-9]+)/"', rendered)
             self.assertEqual(len(set(ids)), 5)
-            refreshed_ids = re.findall(r'href="/g/([0-9]+)/"', refreshed)
+            refreshed_ids = re.findall(r'href="/downloads/g/([0-9]+)/"', refreshed)
             self.assertNotEqual(ids, refreshed_ids)
 
     def test_nested_cbz_is_extracted_without_removing_archive(self):
