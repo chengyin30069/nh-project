@@ -12,6 +12,9 @@ You can get better download speed using our script since all it does is
 thus provides a faster and safer download experience, all you need to do is provide your cookie and \
 browser agent version in the script
 
+Current architecture, routes, metadata indexing, deployment state, and new-session
+handoff notes are maintained in [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md).
+
 # Dependencies
 * aria2
 * wget
@@ -82,10 +85,25 @@ navigation never fetches per-page HTML from nhentai.
 
 `/downloads/` lists downloaded galleries newest-first with 25 galleries per
 page, and `/downloads/random/` chooses five different downloaded galleries on
-every request. Undownloaded galleries can also be read through the local reader:
+every request. `/downloads/search/` searches downloaded English, Japanese, and
+Pretty titles, while `/downloads/{type}/{slug}/` browses local tags, artists,
+characters, parodies, groups, languages, and categories. Local cards open a
+fully local `/downloads/g/{id}/` detail page and reader. Undownloaded galleries
+can also be read through the proxy-side local reader:
 gallery metadata is fetched once and full-size pages are proxied into a
 temporary 24-hour, 2 GiB LRU cache without creating a CBZ or marking the gallery
 as downloaded.
+
+Local detail pages show nhentai CDN content thumbnails that link to the local
+CBZ reader. Their taxonomy links default to the local database and display
+local downloaded-gallery counts; proxy detail pages continue to default to
+nhentai taxonomy links. Each mode is remembered separately per browser tab.
+
+Downloaded metadata is indexed in `~/nh/.nh-local/library.sqlite3`. Existing
+archives are indexed in the background without delaying server startup; CBZ
+metadata is preferred and only incomplete records are repaired from upstream,
+at no more than one request per second. Rebuild the index manually with
+`python3 server/nh_server.py --reindex-library`.
 
 Cached HTML, read-only API responses, metadata, and extracted CBZ files live
 under `~/nh/.nh-local/`. HTML is fresh for 15 minutes, public API JSON is
@@ -137,6 +155,14 @@ sudo cp systemd/nh-downloader.service /etc/systemd/system/nh-downloader.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now nh-downloader.service
 ```
+
+## Tailscale-only HTTPS
+
+The deployed nginx reverse proxy for `https://ahltail.duckdns.org` listens only
+on the server's Tailscale address and uses a private self-signed CA. Server
+paths, certificate renewal, client trust installation, verification, and
+troubleshooting are documented in
+[`deploy/nginx/README.md`](deploy/nginx/README.md).
 
 # Firefox extension
 
