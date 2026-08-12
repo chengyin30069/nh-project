@@ -1,0 +1,21 @@
+services:
+  nh-server:
+    build:
+      context: .
+      dockerfile: server.Dockerfile
+    image: nh-project-server:local
+    restart: unless-stopped
+    network_mode: host
+    user: "${NH_UID:-1000}:${NH_GID:-1000}"
+    environment:
+      HOME: "${HOME}"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ${HOME}/nh:${HOME}/nh
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

@@ -31,8 +31,10 @@ from urllib.request import Request, urlopen
 
 try:
     from server.library_db import GALLERY_TYPES, LibraryDatabase, LibraryIndexer, parse_gallery_metadata
+    from server.config import config_environment, find_config_path, load_yaml_config
 except ModuleNotFoundError:  # Direct execution: python3 server/nh_server.py
     from library_db import GALLERY_TYPES, LibraryDatabase, LibraryIndexer, parse_gallery_metadata
+    from config import config_environment, find_config_path, load_yaml_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -40,9 +42,9 @@ LOCAL_UI_CSS_PATH = PROJECT_ROOT / "server" / "static" / "local-ui.css"
 LOCAL_UI_JS_PATH = PROJECT_ROOT / "server" / "static" / "local-ui.js"
 DEFAULT_ALLOWED_NETWORKS = (
     "192.168.50.0/24",
-    "192.168.193.0/24",
     "127.0.0.1/32",
     "::1/128",
+    "172.17.0.0/16",
     "100.64.0.0/10",
 )
 TERMINAL_STATUSES = {"succeeded", "failed"}
@@ -2097,15 +2099,87 @@ def make_library_handler(
     return NhLibraryRequestHandler
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
+def restore_library_from_database(
+    source_path: Path,
+    manager: DownloadManager,
+    library: LocalLibrary,
+    *,
+    report_path: Path | None = None,
+) -> dict[str, object]:
+    """Re-download every still-available gallery described by an old SQLite index."""
+
+    records = LibraryDatabase.restore_records(source_path)
+    report_path = report_path or manager.local_cache_root() / "restore-report.json"
+    report: dict[str, object] = {
+        "source": str(source_path.resolve()),
+        "target": str(manager.storage_dir),
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "total": len(records),
+        "downloaded": [],
+        "already_present": [],
+        "failed": [],
+    }
+
+    def write_report() -> None:
+        report["updated_at"] = time.time()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        temp = report_path.with_name(f".{report_path.name}.{uuid.uuid4().hex}.tmp")
+        temp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp, report_path)
+
+    write_report()
+    for position, record in enumerate(records, 1):
+        gallery_id = str(record["id"])
+        existed = manager.archive_path(gallery_id).exists()
+        print(f"restore [{position}/{len(records)}] gallery {gallery_id}", flush=True)
+        job, _created = manager.submit(gallery_id)
+        if job.status not in TERMINAL_STATUSES:
+            manager.queue.join()
+        job = manager.get_job(job.job_id) or job
+        if job.status != "succeeded" or not manager.archive_path(gallery_id).exists():
+            report["failed"].append(
+                {"id": gallery_id, "error": job.error or "download did not produce a CBZ"}
+            )
+            write_report()
+            continue
+
+        target_record = library.database.gallery(gallery_id)
+        if target_record is None or target_record.get("metadata_status") != "complete":
+            library.database.upsert_gallery(
+                manager.archive_path(gallery_id),
+                record["metadata"],
+                complete=record.get("metadata_status") == "complete",
+                source="restore",
+            )
+        library.database.set_downloaded_at(gallery_id, float(record["downloaded_at"]))
+        key = "already_present" if existed else "downloaded"
+        report[key].append(gallery_id)
+        if position % 25 == 0:
+            write_report()
+
+    report["finished_at"] = time.time()
+    write_report()
+    print(
+        f"restore complete: downloaded={len(report['downloaded'])} "
+        f"already_present={len(report['already_present'])} failed={len(report['failed'])}; "
+        f"report={report_path}",
+        flush=True,
+    )
+    return report
+
+
+def build_arg_parser(env: dict[str, str] | None = None) -> argparse.ArgumentParser:
+    env = env or os.environ
     parser = argparse.ArgumentParser(description="LAN HTTP server for nh-project downloads")
-    parser.add_argument("--host", default=os.environ.get("NH_SERVER_HOST", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("NH_SERVER_PORT", "8765")))
-    parser.add_argument("--library-host", default=os.environ.get("NH_LIBRARY_HOST"))
-    parser.add_argument("--library-port", type=int, default=int(os.environ.get("NH_LIBRARY_PORT", "8766")))
-    parser.add_argument("--cookie-file", default=os.environ.get("NH_COOKIE_FILE", str(PROJECT_ROOT / "cookie.sh")))
-    parser.add_argument("--download-script", default=os.environ.get("NH_DOWNLOAD_SCRIPT", str(PROJECT_ROOT / "nh2_requireCfToken.sh")))
-    parser.add_argument("--storage-dir", default=os.environ.get("NH_FOLDER_PATH"))
+    parser.add_argument("--config", help="YAML configuration file (defaults to ./config.yaml when present)")
+    parser.add_argument("--host", default=env.get("NH_SERVER_HOST", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=int(env.get("NH_SERVER_PORT", "8765")))
+    parser.add_argument("--library-host", default=env.get("NH_LIBRARY_HOST"))
+    parser.add_argument("--library-port", type=int, default=int(env.get("NH_LIBRARY_PORT", "8766")))
+    parser.add_argument("--cookie-file", default=env.get("NH_COOKIE_FILE"), help="legacy cookie.sh file")
+    parser.add_argument("--download-script", default=env.get("NH_DOWNLOAD_SCRIPT", str(PROJECT_ROOT / "nh2_requireCfToken.sh")))
+    parser.add_argument("--storage-dir", default=env.get("NH_FOLDER_PATH"))
     parser.add_argument("--html-cache-ttl", type=int, help="HTML freshness lifetime in seconds")
     parser.add_argument("--api-cache-ttl", type=int, help="public read-only API freshness lifetime in seconds")
     parser.add_argument("--html-cache-max-age", type=int, help="remove HTML cache entries unused for this many seconds")
@@ -2125,6 +2199,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="force an upstream metadata refresh for one downloaded gallery, then exit",
     )
     parser.add_argument(
+        "--restore-library-db",
+        metavar="PATH",
+        help="re-download galleries from an existing library.sqlite3, preserve old download times, then exit",
+    )
+    parser.add_argument(
+        "--restore-report",
+        metavar="PATH",
+        help="JSON report path for --restore-library-db (defaults inside the target .nh-local directory)",
+    )
+    parser.add_argument(
         "--allowed-network",
         action="append",
         dest="allowed_networks",
@@ -2135,8 +2219,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = build_arg_parser().parse_args()
-    env = load_cookie_env(Path(args.cookie_file))
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config")
+    bootstrap_args, _unknown = bootstrap.parse_known_args()
+    config_path, config_required = find_config_path(bootstrap_args.config, PROJECT_ROOT)
+    try:
+        config = load_yaml_config(config_path, required=config_required)
+    except (RuntimeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    env = config_environment(config, config_path)
+    env.update(os.environ)
+    args = build_arg_parser(env).parse_args()
+    if args.cookie_file:
+        env = load_cookie_env(Path(args.cookie_file), env)
+    elif not env.get("NH_COOKIE") and not env.get("NH_USER_AGENT"):
+        legacy_cookie = PROJECT_ROOT / "cookie.sh"
+        if legacy_cookie.exists():
+            env = load_cookie_env(legacy_cookie, env)
     if args.storage_dir:
         env["NH_FOLDER_PATH"] = args.storage_dir
     cache_args = {
@@ -2153,19 +2252,30 @@ def main() -> None:
         if value is not None:
             env[name] = str(value)
 
-    maintenance_mode = args.reindex_library or args.refresh_gallery is not None
+    maintenance_mode = args.reindex_library or args.refresh_gallery is not None or args.restore_library_db is not None
+    restore_mode = args.restore_library_db is not None
     manager = DownloadManager(
         project_root=PROJECT_ROOT,
         script_path=Path(args.download_script),
         storage_dir=expand_path(env.get("NH_FOLDER_PATH", str(Path.home() / "nh"))),
         env=env,
-        autostart=not maintenance_mode,
+        autostart=not maintenance_mode or restore_mode,
     )
-    networks = parse_networks(args.allowed_networks or DEFAULT_ALLOWED_NETWORKS)
+    configured_networks = [
+        item.strip() for item in env.get("NH_ALLOWED_NETWORKS", "").split(",") if item.strip()
+    ]
+    networks = parse_networks(args.allowed_networks or configured_networks or DEFAULT_ALLOWED_NETWORKS)
     library = LocalLibrary(
         manager, env=env, cache_autostart=not maintenance_mode, index_autostart=not maintenance_mode
     )
     if maintenance_mode:
+        if args.restore_library_db is not None:
+            restore_library_from_database(
+                expand_path(args.restore_library_db),
+                manager,
+                library,
+                report_path=expand_path(args.restore_report) if args.restore_report else None,
+            )
         if args.reindex_library:
             library.indexer.index_now(repair_remote=True)
             print(f"library index rebuilt at {library.database.path}")

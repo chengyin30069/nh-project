@@ -14,6 +14,8 @@ browser agent version in the script
 
 Current architecture, routes, metadata indexing, deployment state, and new-session
 handoff notes are maintained in [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md).
+YAML configuration, Docker server deployment, and SQLite-only library restoration
+are documented in [`doc/docker_server.md`](doc/docker_server.md).
 
 # Dependencies
 * aria2
@@ -167,6 +169,14 @@ button; deletion opens an in-page confirmation dialog showing the gallery ID and
 title before calling the local server.
 
 # Using Docker
+
+The gallery server has a separate `server.Dockerfile` and `compose.yaml`. Its
+real `config.yaml` is mounted read-only and is never baked into the image. See
+[`doc/docker_server.md`](doc/docker_server.md) for setup and SQLite-only library
+restoration.
+
+The original downloader-only image remains available:
+
 For Windows users or who just want to use docker, simply build with Dockerfile we provided 
 1. `docker build -t nh-project .`
 2. `docker run --rm -v "${HOME}/nh:/root/nh" nh-project` (run `bash download.sh nhentai.txt` in docker)

@@ -1,0 +1,36 @@
+# Copy to config.yaml and chmod 600 config.yaml. Never commit the real cookie.
+auth:
+  cookie: "cf_clearance=...; csrftoken=..."
+  user_agent: "Mozilla/5.0 (...) Firefox/..."
+
+server:
+  host: "0.0.0.0"
+  port: 8765
+  library_host: "0.0.0.0"
+  library_port: 8766
+  allowed_networks:
+    - "127.0.0.1/32"
+    - "192.168.50.0/24"
+    - "172.17.0.0/16"
+    - "100.64.0.0/10"
+
+paths:
+  storage: "~/nh"
+  download_script: "./nh2_requireCfToken.sh"
+  # Set only while migrating from the legacy shell configuration.
+  # legacy_cookie_file: "./cookie.sh"
+
+download:
+  max_retry: 20
+  media_servers: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+  parallel: 100
+
+cache:
+  html_ttl_seconds: 900
+  api_ttl_seconds: 60
+  html_max_age_seconds: 604800
+  html_max_bytes: 536870912
+  extract_max_bytes: 5368709120
+  preview_max_age_seconds: 86400
+  preview_max_bytes: 2147483648
+  sweep_interval_seconds: 3600

@@ -36,7 +36,8 @@ class ValidationTests(unittest.TestCase):
     def test_allowed_networks(self):
         networks = parse_networks(DEFAULT_ALLOWED_NETWORKS)
         self.assertTrue(is_ip_allowed("192.168.50.144", networks))
-        self.assertTrue(is_ip_allowed("192.168.193.144", networks))
+        self.assertFalse(is_ip_allowed("192.168.193.144", networks))
+        self.assertTrue(is_ip_allowed("172.17.0.1", networks))
         self.assertTrue(is_ip_allowed("127.0.0.1", networks))
         self.assertTrue(is_ip_allowed("100.109.167.26", networks))
         self.assertFalse(is_ip_allowed("100.1.2.3", networks))

@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 from server.library_db import LibraryDatabase, LibraryIndexer, parse_gallery_metadata
-from server.nh_server import DownloadManager, LocalLibrary
+from server.nh_server import DownloadManager, LocalLibrary, restore_library_from_database
 
 
 def legacy_html(metadata):
@@ -277,6 +277,69 @@ class DownloadMetadataToleranceTests(unittest.TestCase):
             self.assertEqual(manager.get_job(job.job_id).status, "succeeded")
             self.assertTrue((storage / "123456.cbz").exists())
             self.assertTrue(any("Metadata pending" in line for line in manager.get_job(job.job_id).logs))
+
+
+class LibraryRestoreTests(unittest.TestCase):
+    def test_restore_redownloads_available_galleries_and_preserves_old_download_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_storage = root / "source"
+            target_storage = root / "target"
+            source_storage.mkdir()
+            old_metadata = {
+                "id": 123456,
+                "media_id": 111,
+                "title": {"pretty": "Old metadata"},
+                "tags": [{"id": 2, "type": "artist", "name": "Old", "slug": "old", "url": "/artist/old/"}],
+            }
+            source_archive = write_gallery(source_storage, 123456, old_metadata, stamp=1234)
+            source_database = LibraryDatabase(source_storage)
+            source_database.index_archive(source_archive)
+            source_database.set_downloaded_at("123456", 4321.0)
+
+            new_metadata = {
+                "id": 123456,
+                "media_id": 222,
+                "title": {"pretty": "Fresh metadata"},
+                "tags": [{"id": 3, "type": "artist", "name": "Fresh", "slug": "fresh", "url": "/artist/fresh/"}],
+            }
+            fixture = root / "fresh.html"
+            fixture.write_text(legacy_html(new_metadata), encoding="utf-8")
+            script = root / "downloader.sh"
+            script.write_text(
+                '#!/bin/sh\nmkdir -p "$NH_FOLDER_PATH/$1"\n'
+                'cp "$NH_METADATA_FIXTURE" "$NH_FOLDER_PATH/$1/cover_page.html"\n'
+                'printf image > "$NH_FOLDER_PATH/$1/1.jpg"\n',
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            manager = DownloadManager(
+                project_root=root,
+                storage_dir=target_storage,
+                env={
+                    **os.environ,
+                    "NH_FOLDER_PATH": str(target_storage),
+                    "NH_METADATA_FIXTURE": str(fixture),
+                },
+                downloader_command=[str(script)],
+            )
+            library = LocalLibrary(manager, cache_autostart=False)
+            report_path = root / "report.json"
+
+            report = restore_library_from_database(
+                source_database.path, manager, library, report_path=report_path
+            )
+
+            restored = library.database.gallery("123456")
+            self.assertEqual(report["downloaded"], ["123456"])
+            self.assertEqual(report["failed"], [])
+            self.assertEqual(restored["title"], "Fresh metadata")
+            self.assertEqual(restored["downloaded_at"], 4321.0)
+            self.assertEqual(
+                [tag["name"] for tag in restored["tags"] if tag["type"] == "artist"], ["Fresh"]
+            )
+            self.assertTrue((target_storage / "123456.cbz").exists())
+            self.assertEqual(json.loads(report_path.read_text())["downloaded"], ["123456"])
 
 
 if __name__ == "__main__":
