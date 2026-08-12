@@ -300,6 +300,17 @@
     const local = mode === "local";
     document.querySelectorAll("[data-upstream-href][data-local-href]").forEach((link) => {
       link.setAttribute("href", local ? link.dataset.localHref : link.dataset.upstreamHref);
+      const count = link.querySelector(".count, .nh-taxonomy-count");
+      if (count) {
+        const value = Number.parseInt(local ? count.dataset.localCount : count.dataset.upstreamCount, 10);
+        count.textContent = Number.isFinite(value) && value >= 0 ? formatTaxonomyCount(value) : "…";
+        count.title = Number.isFinite(value) && value >= 0
+          ? `${value.toLocaleString()} local ${value === 1 ? "gallery" : "galleries"}`
+          : "Count unavailable";
+        if (!local && Number.isFinite(value) && value >= 0) {
+          count.title = `${value.toLocaleString()} ${value === 1 ? "gallery" : "galleries"} on nhentai`;
+        }
+      }
     });
     document.querySelectorAll("[data-nh-taxonomy-toggle]").forEach((button) => {
       button.textContent = local ? "Local" : "nhentai";
@@ -308,11 +319,43 @@
     });
   }
 
+  function formatTaxonomyCount(value) {
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+    return String(value);
+  }
+
+  function exactCountFromElement(element) {
+    const title = element?.getAttribute("title") || "";
+    const match = title.match(/[0-9][0-9,]*/);
+    return match ? Number.parseInt(match[0].replaceAll(",", ""), 10) : -1;
+  }
+
+  async function loadLocalTaxonomyCounts(items, storageKey, defaultMode) {
+    if (!items.length) return;
+    try {
+      const body = await request("/taxonomies/counts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taxonomies: items.map(({ type, slug }) => ({ type, slug })) }),
+      });
+      for (const item of items) {
+        const value = body.counts?.[`${item.type}/${item.slug}`];
+        if (Number.isInteger(value)) item.count.dataset.localCount = String(value);
+      }
+      const storedMode = window.sessionStorage.getItem(storageKey);
+      applyTaxonomyMode(storedMode === "local" || storedMode === "upstream" ? storedMode : defaultMode);
+    } catch {
+      // Upstream counts already rendered by nhentai remain usable if the local database is busy.
+    }
+  }
+
   function setupTaxonomyToggle() {
     if (!window.location.pathname.match(GALLERY_PATH_RE)) return;
     const localGallery = window.location.pathname.startsWith("/downloads/g/");
     const storageKey = `${TAXONOMY_MODE_KEY}:${localGallery ? "downloads" : "proxy"}`;
     const defaultMode = localGallery ? "local" : "upstream";
+    const missingLocalCounts = [];
     for (const link of document.querySelectorAll("a[href]")) {
       let url;
       try { url = new URL(link.getAttribute("href"), window.location.origin); } catch { continue; }
@@ -322,6 +365,16 @@
       link.dataset.upstreamHref = `${url.pathname}${url.search}${url.hash}`;
       link.dataset.localHref = `/downloads/${match[1]}/${match[2]}/`;
       link.classList.add("nh-taxonomy-link");
+      const count = link.querySelector(".count, .nh-taxonomy-count");
+      if (count) {
+        if (count.dataset.upstreamCount === undefined) {
+          count.dataset.upstreamCount = String(exactCountFromElement(count));
+        }
+        if (count.dataset.localCount === undefined && !count.dataset.nhLocalCountRequested) {
+          count.dataset.nhLocalCountRequested = "true";
+          missingLocalCounts.push({ type: match[1], slug: match[2], count });
+        }
+      }
     }
     let button = document.querySelector("[data-nh-taxonomy-toggle]");
     if (!button && document.querySelector("[data-upstream-href][data-local-href]")) {
@@ -343,6 +396,7 @@
     }
     const storedMode = window.sessionStorage.getItem(storageKey);
     applyTaxonomyMode(storedMode === "local" || storedMode === "upstream" ? storedMode : defaultMode);
+    loadLocalTaxonomyCounts(missingLocalCounts, storageKey, defaultMode);
   }
 
   function renderCurrentPage(version) {

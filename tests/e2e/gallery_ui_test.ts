@@ -7,13 +7,13 @@ const uiStyle = await Deno.readTextFile(new URL("../../server/static/local-ui.cs
 function fixtureHtml(pathname: string): string {
   const detail = /^(?:\/downloads)?\/g\//.test(pathname);
   const content = detail
-    ? '<main id="info"><h1>Fixture Detail</h1><a class="btn" href="/download">Download</a><div id="tags"><a href="/artist/alice/">Alice</a></div></main>'
+    ? '<main id="info"><h1>Fixture Detail</h1><a class="btn" href="/download">Download</a><div id="tags"><a href="/artist/alice/">Alice <span class="count" title="123,456 galleries">123.5k</span></a></div></main>'
     : `<main><div class="gallery-grid">
         <div class="gallery"><a class="cover" href="/g/123456/"><img alt="Downloaded fixture"><div class="caption">Downloaded fixture</div></a></div>
         <div class="gallery"><a class="cover" href="/g/654321/"><img alt="Remote fixture"><div class="caption">Remote fixture</div></a></div>
       </div></main>`;
   const hydrated = detail
-    ? '<h1>Fixture Detail</h1><a class="btn" href="/download">Download</a><div id="tags"><a href="/artist/alice/">Alice</a></div><button aria-label="Favorite gallery">Favorite</button>'
+    ? '<h1>Fixture Detail</h1><a class="btn" href="/download">Download</a><div id="tags"><a href="/artist/alice/">Alice <span class="count" title="123,456 galleries">123.5k</span></a></div><button aria-label="Favorite gallery">Favorite</button>'
     : `<div class="gallery-grid">
         <div class="gallery"><a class="cover" href="/g/123456/"><img alt="Downloaded fixture"><div class="caption">Downloaded fixture</div></a></div>
         <div class="gallery"><a class="cover" href="/g/654321/"><img alt="Remote fixture"><div class="caption">Remote fixture</div></a></div>
@@ -52,6 +52,9 @@ Deno.test("controls survive hydration and match extension behavior", async () =>
       }]));
       return Response.json({ galleries });
     }
+    if (url.pathname === "/_nh-local/api/taxonomies/counts") {
+      return Response.json({ counts: { "artist/alice": 7 } });
+    }
     if (url.pathname === "/_nh-local/api/download") {
       const body = await request.json();
       queuedDownloads.push(body.id);
@@ -85,18 +88,23 @@ Deno.test("controls survive hydration and match extension behavior", async () =>
     const taxonomyToggle = page.locator("[data-nh-taxonomy-toggle]");
     assertEquals(await taxonomyToggle.textContent(), "nhentai");
     assertEquals(await page.locator("#tags a").getAttribute("href"), "/artist/alice/");
+    assertEquals(await page.locator("#tags .count").textContent(), "123.5k");
     await taxonomyToggle.click();
     assertEquals(await page.locator("#tags a").getAttribute("href"), "/downloads/artist/alice/");
+    assertEquals(await page.locator("#tags .count").textContent(), "7");
     await page.reload();
     await page.waitForTimeout(2100);
     assertEquals(await page.locator("[data-nh-taxonomy-toggle]").textContent(), "Local");
+    assertEquals(await page.locator("#tags .count").textContent(), "7");
     await page.locator("[data-nh-taxonomy-toggle]").click();
     assertEquals(await page.locator("[data-nh-taxonomy-toggle]").textContent(), "nhentai");
+    assertEquals(await page.locator("#tags .count").textContent(), "123.5k");
 
     await page.goto(`http://127.0.0.1:${port}/downloads/g/654321/`);
     await page.waitForTimeout(2100);
     assertEquals(await page.locator("[data-nh-taxonomy-toggle]").textContent(), "Local");
     assertEquals(await page.locator("#tags a").getAttribute("href"), "/downloads/artist/alice/");
+    assertEquals(await page.locator("#tags .count").textContent(), "7");
     await page.locator("[data-nh-taxonomy-toggle]").click();
     await page.reload();
     await page.waitForTimeout(2100);

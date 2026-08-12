@@ -65,6 +65,7 @@ class LibraryDatabaseTests(unittest.TestCase):
                     "name": artist if kind == "artist" else f"{kind}-name",
                     "slug": artist if kind == "artist" else f"{kind}-slug",
                     "url": f"/{kind}/{artist if kind == 'artist' else f'{kind}-slug'}/",
+                    "count": 1000 + position,
                 }
                 for position, kind in enumerate(types)
             ],
@@ -83,6 +84,9 @@ class LibraryDatabaseTests(unittest.TestCase):
             })
             self.assertEqual(database.search("pha")[0][0]["id"], "123456")
             self.assertEqual(database.search("猫")[0][0]["id"], "123456")
+            self.assertEqual(record["title"], "Alpha Beta")
+            self.assertEqual(record["secondary_title"], "猫本")
+            self.assertEqual(record["tags"][1]["upstream_count"], 1001)
 
     def test_search_and_taxonomy_are_id_descending_but_downloads_use_mtime(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +101,27 @@ class LibraryDatabaseTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in database.search("Shared")[0]], ["200002", "100001"])
             self.assertEqual([item["id"] for item in database.taxonomy("artist", "alice")[1]], ["200002", "100001"])
             self.assertEqual(database.gallery("200002")["tags"][1]["local_count"], 2)
+            self.assertEqual(database.taxonomy_counts([("artist", "alice"), ("tag", "missing")]), {
+                "artist/alice": 2,
+                "tag/missing": 0,
+            })
+
+    def test_newer_metadata_without_upstream_count_does_not_erase_known_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            database = LibraryDatabase(storage)
+            counted = self.metadata(100001, "Counted")
+            counted["tags"][1]["count"] = 54321
+            first = write_gallery(storage, 100001, counted, stamp=100)
+            unknown = self.metadata(200002, "Unknown")
+            unknown["tags"][1].pop("count")
+            second = write_gallery(storage, 200002, unknown, stamp=200)
+
+            database.index_archive(first)
+            database.index_archive(second)
+
+            artist = next(tag for tag in database.gallery("200002")["tags"] if tag["type"] == "artist")
+            self.assertEqual(artist["upstream_count"], 54321)
 
     def test_fallback_is_pending_and_delete_cascades(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -168,7 +193,7 @@ class LibraryDatabaseTests(unittest.TestCase):
     def test_local_pages_use_separate_routes_and_no_upstream_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp)
-            write_gallery(storage, 123456, self.metadata(123456, "Local title"))
+            write_gallery(storage, 123456, self.metadata(123456, "[Alice] Local title [Digital]"))
             manager = DownloadManager(storage_dir=storage, autostart=False)
             library = LocalLibrary(manager, cache_autostart=False)
 
@@ -181,7 +206,9 @@ class LibraryDatabaseTests(unittest.TestCase):
             self.assertIn('data-upstream-href="/artist/alice/"', detail)
             self.assertIn('data-local-href="/downloads/artist/alice/"', detail)
             self.assertIn('href="/downloads/artist/alice/"', detail)
-            self.assertIn('<span class="nh-taxonomy-count">1</span>', detail)
+            self.assertIn('[Alice] Local title [Digital]', catalog)
+            self.assertIn('<h1>[Alice] Local title [Digital]</h1><h2>猫本</h2>', detail)
+            self.assertIn('data-upstream-count="1001" data-local-count="1">1</span>', detail)
             self.assertIn('src="/preview-thumbnail/123456/1"', detail)
             self.assertIn('/downloads/g/123456/1/', reader)
 

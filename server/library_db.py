@@ -126,6 +126,8 @@ class LibraryDatabase:
                     name TEXT NOT NULL,
                     slug TEXT NOT NULL,
                     upstream_url TEXT NOT NULL DEFAULT '',
+                    upstream_count INTEGER NOT NULL DEFAULT -1,
+                    upstream_count_at REAL NOT NULL DEFAULT 0,
                     PRIMARY KEY (id, type),
                     UNIQUE (type, slug)
                 );
@@ -175,6 +177,16 @@ class LibraryDatabase:
                 """INSERT OR IGNORE INTO taxonomy_aliases(taxonomy_type,upstream_id,canonical_id)
                 SELECT type,id,id FROM taxonomies"""
             )
+            taxonomy_columns = {row[1] for row in db.execute("PRAGMA table_info(taxonomies)")}
+            count_migration = False
+            if "upstream_count" not in taxonomy_columns:
+                db.execute("ALTER TABLE taxonomies ADD COLUMN upstream_count INTEGER NOT NULL DEFAULT -1")
+                count_migration = True
+            if "upstream_count_at" not in taxonomy_columns:
+                db.execute("ALTER TABLE taxonomies ADD COLUMN upstream_count_at REAL NOT NULL DEFAULT 0")
+                count_migration = True
+            if count_migration:
+                db.execute("UPDATE galleries SET archive_mtime_ns=-1")
 
     @staticmethod
     def archive_source(archive: Path) -> str:
@@ -287,7 +299,14 @@ class LibraryDatabase:
                 if not slug:
                     slug = re.sub(r"[^a-z0-9]+", "-", str(tag["name"]).lower()).strip("-")
                 canonical_id = self._resolve_taxonomy(
-                    db, taxonomy_id, taxonomy_type, str(tag["name"]), slug, upstream_url
+                    db,
+                    taxonomy_id,
+                    taxonomy_type,
+                    str(tag["name"]),
+                    slug,
+                    upstream_url,
+                    int(tag["count"]) if str(tag.get("count", "")).isdigit() else -1,
+                    stat.st_mtime,
                 )
                 db.execute(
                     """INSERT INTO gallery_taxonomies(
@@ -307,6 +326,8 @@ class LibraryDatabase:
         name: str,
         slug: str,
         upstream_url: str,
+        upstream_count: int,
+        observed_at: float,
     ) -> int:
         """Resolve unstable upstream IDs to one local category identified by type+slug."""
 
@@ -338,20 +359,34 @@ class LibraryDatabase:
                 )
                 db.execute("DELETE FROM taxonomies WHERE id=? AND type=?", (old_id, taxonomy_type))
             db.execute(
-                "UPDATE taxonomies SET name=?,upstream_url=? WHERE id=? AND type=?",
-                (name, upstream_url, canonical_id, taxonomy_type),
+                """UPDATE taxonomies SET name=?,upstream_url=?,
+                upstream_count=CASE WHEN ? >= 0 AND ? >= upstream_count_at THEN ? ELSE upstream_count END,
+                upstream_count_at=CASE WHEN ? >= 0 THEN MAX(upstream_count_at,?) ELSE upstream_count_at END
+                WHERE id=? AND type=?""",
+                (
+                    name, upstream_url, upstream_count, observed_at, upstream_count,
+                    upstream_count, observed_at, canonical_id, taxonomy_type,
+                ),
             )
         elif id_row is not None:
             canonical_id = upstream_id
             db.execute(
-                "UPDATE taxonomies SET name=?,slug=?,upstream_url=? WHERE id=? AND type=?",
-                (name, slug, upstream_url, canonical_id, taxonomy_type),
+                """UPDATE taxonomies SET name=?,slug=?,upstream_url=?,
+                upstream_count=CASE WHEN ? >= 0 AND ? >= upstream_count_at THEN ? ELSE upstream_count END,
+                upstream_count_at=CASE WHEN ? >= 0 THEN MAX(upstream_count_at,?) ELSE upstream_count_at END
+                WHERE id=? AND type=?""",
+                (
+                    name, slug, upstream_url, upstream_count, observed_at, upstream_count,
+                    upstream_count, observed_at, canonical_id, taxonomy_type,
+                ),
             )
         else:
             canonical_id = upstream_id
             db.execute(
-                "INSERT INTO taxonomies(id,type,name,slug,upstream_url) VALUES(?,?,?,?,?)",
-                (canonical_id, taxonomy_type, name, slug, upstream_url),
+                """INSERT INTO taxonomies(
+                id,type,name,slug,upstream_url,upstream_count,upstream_count_at
+                ) VALUES(?,?,?,?,?,?,?)""",
+                (canonical_id, taxonomy_type, name, slug, upstream_url, upstream_count, observed_at),
             )
 
         db.execute(
@@ -394,6 +429,7 @@ class LibraryDatabase:
                 dict(item)
                 for item in db.execute(
                     """SELECT COALESCE(gt.source_taxonomy_id,t.id) AS id,t.type,t.name,t.slug,t.upstream_url,
+                    t.upstream_count,
                     (SELECT count(*) FROM gallery_taxonomies totals
                      WHERE totals.taxonomy_id=t.id AND totals.taxonomy_type=t.type) AS local_count
                     FROM gallery_taxonomies gt JOIN taxonomies t
@@ -403,7 +439,8 @@ class LibraryDatabase:
                 )
             ]
         record["id"] = str(record["id"])
-        record["title"] = record["title_pretty"] or record["title_english"] or f"Gallery {gallery_id}"
+        record["title"] = record["title_english"] or record["title_pretty"] or f"Gallery {gallery_id}"
+        record["secondary_title"] = record["title_japanese"] or ""
         return record
 
     def downloaded(self, *, page: int = 1, per_page: int = 25) -> tuple[list[dict[str, object]], int]:
@@ -445,6 +482,24 @@ class LibraryDatabase:
         records, total = self._paged(sql, (taxonomy_type, taxonomy["id"]), page, per_page)
         return str(taxonomy["name"]), records, total
 
+    def taxonomy_counts(self, values: list[tuple[str, str]]) -> dict[str, int]:
+        unique = list(dict.fromkeys(values))
+        if not unique:
+            return {}
+        counts: dict[str, int] = {}
+        with self._connect() as db:
+            for taxonomy_type, slug in unique:
+                if taxonomy_type not in GALLERY_TYPES:
+                    continue
+                row = db.execute(
+                    """SELECT count(*) FROM gallery_taxonomies gt JOIN taxonomies t
+                    ON t.id=gt.taxonomy_id AND t.type=gt.taxonomy_type
+                    WHERE t.type=? AND t.slug=?""",
+                    (taxonomy_type, slug),
+                ).fetchone()
+                counts[f"{taxonomy_type}/{slug}"] = int(row[0])
+        return counts
+
     def _paged(
         self, sql: str, params: tuple[object, ...], page: int, per_page: int
     ) -> tuple[list[dict[str, object]], int]:
@@ -458,7 +513,8 @@ class LibraryDatabase:
     def _record(row: sqlite3.Row) -> dict[str, object]:
         record = dict(row)
         record["id"] = str(record["id"])
-        record["title"] = record["title_pretty"] or record["title_english"] or f"Gallery {record['id']}"
+        record["title"] = record["title_english"] or record["title_pretty"] or f"Gallery {record['id']}"
+        record["secondary_title"] = record["title_japanese"] or ""
         return record
 
 

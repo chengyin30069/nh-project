@@ -870,18 +870,38 @@ class LocalLibrary:
             f'alt="{html.escape(str(record["title"]))}">' if images else
             '<div class="nh-catalog-placeholder">No cover</div>'
         )
+        detail_metadata: dict[str, object] = {}
+        try:
+            detail_metadata = self._detail_preview_metadata(gallery_id)
+        except Exception as exc:  # The local archive and reader must remain usable offline.
+            print(f"preview metadata unavailable for {gallery_id}: {exc}")
+        metadata_counts = {
+            (str(tag.get("type")), str(tag.get("slug"))): int(tag["count"])
+            for tag in detail_metadata.get("tags", [])
+            if isinstance(tag, dict)
+            and str(tag.get("type")) in GALLERY_TYPES
+            and isinstance(tag.get("slug"), str)
+            and str(tag.get("count", "")).isdigit()
+        } if isinstance(detail_metadata.get("tags"), list) else {}
         groups: dict[str, list[str]] = {kind: [] for kind in GALLERY_TYPES}
         for tag in record.get("tags", []):
             if not isinstance(tag, dict) or str(tag.get("type")) not in groups:
                 continue
             kind = str(tag["type"])
             upstream = str(tag.get("upstream_url") or f'/{kind}/{tag.get("slug", "")}/')
-            local = f'/downloads/{kind}/{quote(str(tag.get("slug") or ""))}/'
+            slug = str(tag.get("slug") or "")
+            local = f'/downloads/{kind}/{quote(slug)}/'
             local_count = int(tag.get("local_count") or 0)
+            stored_upstream_count = tag.get("upstream_count")
+            upstream_count = int(stored_upstream_count) if isinstance(stored_upstream_count, int) else -1
+            if upstream_count < 0:
+                upstream_count = metadata_counts.get((kind, slug), -1)
             groups[kind].append(
                 f'<a class="nh-taxonomy-link" data-upstream-href="{html.escape(upstream)}" '
                 f'data-local-href="{html.escape(local)}" href="{html.escape(local)}">'
-                f'{html.escape(str(tag.get("name") or ""))}<span class="nh-taxonomy-count">{local_count}</span></a>'
+                f'{html.escape(str(tag.get("name") or ""))}'
+                f'<span class="nh-taxonomy-count" data-upstream-count="{upstream_count}" '
+                f'data-local-count="{local_count}">{local_count}</span></a>'
             )
         rows = "".join(
             f'<div class="nh-local-tag-row"><strong>{kind.title()}:</strong><div>{"".join(items)}</div></div>'
@@ -892,9 +912,8 @@ class LocalLibrary:
             if record.get("metadata_status") == "pending" else ""
         )
         preview_cards = ""
-        try:
-            metadata = self._detail_preview_metadata(gallery_id)
-            pages = metadata.get("pages") if isinstance(metadata.get("pages"), list) else []
+        if detail_metadata:
+            pages = detail_metadata.get("pages") if isinstance(detail_metadata.get("pages"), list) else []
             preview_cards = "".join(
                 f'<a class="nh-content-thumbnail" href="/downloads/g/{gallery_id}/{number}/">'
                 f'<img loading="lazy" src="/preview-thumbnail/{gallery_id}/{number}" alt="Page {number}"></a>'
@@ -902,9 +921,9 @@ class LocalLibrary:
                 for number in [item.get("number")]
                 if isinstance(number, int) and number > 0
             )
-        except Exception as exc:  # Keep the downloaded gallery usable when upstream preview metadata is unavailable.
-            print(f"preview thumbnails unavailable for {gallery_id}: {exc}")
         title = html.escape(str(record["title"]))
+        secondary_title = html.escape(str(record.get("secondary_title") or ""))
+        subtitle = f'<h2>{secondary_title}</h2>' if secondary_title and secondary_title != title else ""
         return (
             '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{title}</title><link rel="stylesheet" href="/_nh-local/assets/local.css">'
@@ -912,7 +931,7 @@ class LocalLibrary:
             f'{self._local_menu_html()}{self._catalog_site_header_html()}'
             '<main class="nh-local-gallery-page"><section class="nh-local-gallery-panel">'
             f'<div class="nh-local-gallery-cover-wrap">{cover}</div><div id="info" class="nh-local-gallery-info">'
-            f'<h1>{title}</h1><p class="nh-local-gallery-id">#{gallery_id}</p>{pending}'
+            f'<h1>{title}</h1>{subtitle}<p class="nh-local-gallery-id">#{gallery_id}</p>{pending}'
             '<div class="nh-taxonomy-mode"><span>Tag links:</span><button type="button" data-nh-taxonomy-toggle>Local</button></div>'
             f'<div class="nh-local-tags">{rows}</div><p><a class="nh-local-reader-button" href="/downloads/g/{gallery_id}/1/">Read locally</a></p>'
             '</div></section>'
@@ -1426,7 +1445,7 @@ class LocalLibrary:
         title_data = metadata.get("title")
         title = f"Gallery {archive.stem}"
         if isinstance(title_data, dict):
-            title = str(title_data.get("pretty") or title_data.get("english") or title)
+            title = str(title_data.get("english") or title_data.get("pretty") or title)
         elif title_match := ARCHIVE_TITLE_RE.search(source):
             title = html.unescape(title_match.group("title"))
         cover_match = ARCHIVE_COVER_RE.search(source)
@@ -1970,7 +1989,11 @@ def make_library_handler(
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
             path = urlparse(self.path).path
-            if path not in {f"{LOCAL_API_PREFIX}/download", f"{LOCAL_API_PREFIX}/galleries/status"}:
+            if path not in {
+                f"{LOCAL_API_PREFIX}/download",
+                f"{LOCAL_API_PREFIX}/galleries/status",
+                f"{LOCAL_API_PREFIX}/taxonomies/counts",
+            }:
                 self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
             try:
@@ -1985,6 +2008,27 @@ def make_library_handler(
                     return
                 unique_ids = list(dict.fromkeys(gallery_ids))
                 self._send_json({"galleries": library.manager.galleries_status(unique_ids)})
+                return
+            if path.endswith("/taxonomies/counts"):
+                taxonomies = payload.get("taxonomies")
+                if (
+                    not isinstance(taxonomies, list)
+                    or len(taxonomies) > 100
+                    or not all(
+                        isinstance(item, dict)
+                        and item.get("type") in GALLERY_TYPES
+                        and isinstance(item.get("slug"), str)
+                        and 0 < len(item["slug"]) <= 200
+                        for item in taxonomies
+                    )
+                ):
+                    self._send_json(
+                        {"error": "taxonomies must contain at most 100 valid type/slug objects"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                values = [(str(item["type"]), str(item["slug"])) for item in taxonomies]
+                self._send_json({"counts": library.database.taxonomy_counts(values)})
                 return
             gallery_id = payload.get("id")
             if not is_valid_gallery_id(gallery_id):

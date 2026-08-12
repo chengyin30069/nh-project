@@ -778,6 +778,19 @@ class LocalLibraryTests(unittest.TestCase):
                 body = json.loads(response.read())
                 conn.close()
                 conn = HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+                taxonomy_payload = json.dumps({
+                    "taxonomies": [{"type": "artist", "slug": "alice"}],
+                }).encode()
+                conn.request(
+                    "POST",
+                    "/_nh-local/api/taxonomies/counts",
+                    body=taxonomy_payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                taxonomy_response = conn.getresponse()
+                taxonomy_body = json.loads(taxonomy_response.read())
+                conn.close()
+                conn = HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
                 conn.request("GET", "/_nh-local/assets/local.js")
                 asset_response = conn.getresponse()
                 asset = asset_response.read()
@@ -789,6 +802,8 @@ class LocalLibraryTests(unittest.TestCase):
 
             self.assertEqual(response.status, 200)
             self.assertTrue(body["galleries"]["123456"]["downloaded"])
+            self.assertEqual(taxonomy_response.status, 200)
+            self.assertEqual(taxonomy_body["counts"], {"artist/alice": 0})
             self.assertEqual(asset_response.status, 200)
             self.assertIn(b"/_nh-local/api", asset)
 
