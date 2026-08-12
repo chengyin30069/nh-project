@@ -156,14 +156,6 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now nh-downloader.service
 ```
 
-## Tailscale-only HTTPS
-
-The deployed nginx reverse proxy for `https://ahltail.duckdns.org` listens only
-on the server's Tailscale address and uses a private self-signed CA. Server
-paths, certificate renewal, client trust installation, verification, and
-troubleshooting are documented in
-[`deploy/nginx/README.md`](deploy/nginx/README.md).
-
 # Firefox extension
 
 Load `firefox-extension/` temporarily from `about:debugging`. On
