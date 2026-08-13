@@ -443,6 +443,69 @@ class LibraryDatabase:
         record["secondary_title"] = record["title_japanese"] or ""
         return record
 
+    def set_downloaded_at(self, gallery_id: str, downloaded_at: float) -> None:
+        with self._write_lock, self._connect() as db:
+            db.execute("UPDATE galleries SET downloaded_at=? WHERE id=?", (downloaded_at, int(gallery_id)))
+
+    @staticmethod
+    def restore_records(source_path: Path) -> list[dict[str, object]]:
+        """Read normalized gallery metadata from a previous library database."""
+
+        if not source_path.is_file():
+            raise FileNotFoundError(source_path)
+        source = sqlite3.connect(f"file:{source_path.resolve()}?mode=ro", uri=True)
+        source.row_factory = sqlite3.Row
+        try:
+            tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            required = {"galleries", "taxonomies", "gallery_taxonomies"}
+            if not required.issubset(tables):
+                raise ValueError("source database is not a compatible nh-project library.sqlite3")
+            relation_columns = {row[1] for row in source.execute("PRAGMA table_info(gallery_taxonomies)")}
+            source_id = "COALESCE(gt.source_taxonomy_id,t.id)" if "source_taxonomy_id" in relation_columns else "t.id"
+            records: list[dict[str, object]] = []
+            for row in source.execute("SELECT * FROM galleries ORDER BY downloaded_at DESC,id DESC"):
+                metadata: dict[str, object] = {
+                    "id": int(row["id"]),
+                    "title": {
+                        "english": row["title_english"],
+                        "japanese": row["title_japanese"],
+                        "pretty": row["title_pretty"],
+                    },
+                    "cover": {"path": row["cover_path"]},
+                    "cover_url": row["cover_url"],
+                    "tags": [],
+                }
+                if row["media_id"] is not None:
+                    metadata["media_id"] = int(row["media_id"])
+                tags = source.execute(
+                    f"""SELECT {source_id} AS source_id,t.type,t.name,t.slug,t.upstream_url
+                    FROM gallery_taxonomies gt JOIN taxonomies t
+                    ON t.id=gt.taxonomy_id AND t.type=gt.taxonomy_type
+                    WHERE gt.gallery_id=? ORDER BY gt.position""",
+                    (row["id"],),
+                ).fetchall()
+                metadata["tags"] = [
+                    {
+                        "id": int(tag["source_id"]),
+                        "type": tag["type"],
+                        "name": tag["name"],
+                        "slug": tag["slug"],
+                        "url": tag["upstream_url"],
+                    }
+                    for tag in tags
+                ]
+                records.append(
+                    {
+                        "id": str(row["id"]),
+                        "downloaded_at": float(row["downloaded_at"]),
+                        "metadata_status": str(row["metadata_status"]),
+                        "metadata": metadata,
+                    }
+                )
+            return records
+        finally:
+            source.close()
+
     def downloaded(self, *, page: int = 1, per_page: int = 25) -> tuple[list[dict[str, object]], int]:
         return self._paged("SELECT * FROM galleries ORDER BY downloaded_at DESC,id DESC", (), page, per_page)
 

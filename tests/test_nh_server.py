@@ -23,6 +23,7 @@ from server.nh_server import (
     make_library_handler,
     make_handler,
     parse_networks,
+    resolve_client_ip,
 )
 
 
@@ -36,11 +37,27 @@ class ValidationTests(unittest.TestCase):
     def test_allowed_networks(self):
         networks = parse_networks(DEFAULT_ALLOWED_NETWORKS)
         self.assertTrue(is_ip_allowed("192.168.50.144", networks))
-        self.assertTrue(is_ip_allowed("192.168.193.144", networks))
+        self.assertFalse(is_ip_allowed("192.168.193.144", networks))
+        self.assertTrue(is_ip_allowed("172.17.0.1", networks))
         self.assertTrue(is_ip_allowed("127.0.0.1", networks))
         self.assertTrue(is_ip_allowed("100.109.167.26", networks))
         self.assertFalse(is_ip_allowed("100.1.2.3", networks))
         self.assertFalse(is_ip_allowed("192.168.51.144", networks))
+
+    def test_forwarded_client_ip_uses_rightmost_untrusted_hop(self):
+        trusted = parse_networks(["127.0.0.1/32", "172.16.0.0/12"])
+        self.assertEqual(
+            resolve_client_ip("172.20.0.1", "192.168.50.25, 127.0.0.1", trusted),
+            "192.168.50.25",
+        )
+
+    def test_forwarded_header_from_untrusted_peer_is_ignored(self):
+        trusted = parse_networks(["172.16.0.0/12"])
+        self.assertEqual(resolve_client_ip("192.168.50.25", "127.0.0.1", trusted), "192.168.50.25")
+
+    def test_invalid_forwarded_chain_falls_back_to_peer(self):
+        trusted = parse_networks(["172.16.0.0/12"])
+        self.assertEqual(resolve_client_ip("172.20.0.1", "unknown", trusted), "172.20.0.1")
 
 
 class DownloadManagerTests(unittest.TestCase):
@@ -230,7 +247,11 @@ class ApiTests(unittest.TestCase):
             env={**os.environ, "NH_FOLDER_PATH": str(self.storage)},
             downloader_command=[str(self.stub)],
         )
-        handler = make_handler(self.manager, parse_networks(["127.0.0.1/32"]))
+        handler = make_handler(
+            self.manager,
+            parse_networks(["127.0.0.1/32", "192.168.50.0/24"]),
+            parse_networks(["127.0.0.1/32"]),
+        )
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
@@ -333,6 +354,14 @@ class ApiTests(unittest.TestCase):
         status, data = self.request("GET", "/health", extra_headers={"Origin": "moz-extension://test"})
         self.assertEqual(status, 200)
         self.assertTrue(data["ok"])
+
+    def test_trusted_proxy_header_is_checked_against_allowed_networks(self):
+        status, data = self.request("GET", "/health", extra_headers={"X-Forwarded-For": "192.168.50.25"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+
+        status, _ = self.request("GET", "/health", extra_headers={"X-Forwarded-For": "203.0.113.25"})
+        self.assertEqual(status, 403)
 
 
 class StubLibrary(LocalLibrary):

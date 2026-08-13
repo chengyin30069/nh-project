@@ -1,4 +1,11 @@
-doc
-Dockerfile
-nh2.sh
-nh2_old.sh
+.git
+.agents
+.codex
+__pycache__
+*.pyc
+*.xpi
+config.yaml
+cookie.sh
+deploy
+docs
+nh

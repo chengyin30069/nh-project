@@ -2,6 +2,8 @@
 
 # Copy this file to cookie.sh and fill in the values from your browser.
 # The real cookie.sh is intentionally ignored by git.
+# New installations should prefer config.example.yaml; this file remains for
+# backward compatibility with direct execution.
 
 export NH_COOKIE='cf_clearance=...; csrftoken=...'
 export NH_USER_AGENT='Mozilla/5.0 (...) Firefox/...'
