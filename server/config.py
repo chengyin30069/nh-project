@@ -9,7 +9,14 @@ from typing import Any
 
 CONFIG_KEYS = {
     "auth": {"cookie", "user_agent"},
-    "server": {"host", "port", "library_host", "library_port", "allowed_networks"},
+    "server": {
+        "host",
+        "port",
+        "library_host",
+        "library_port",
+        "allowed_networks",
+        "trusted_proxies",
+    },
     "paths": {"storage", "download_script", "legacy_cookie_file"},
     "download": {"max_retry", "media_servers", "parallel"},
     "cache": {
@@ -107,6 +114,9 @@ def config_environment(config: dict[str, Any], config_path: Path | None) -> dict
     networks = config.get("server", {}).get("allowed_networks")
     if networks is not None:
         env["NH_ALLOWED_NETWORKS"] = ",".join(str(item) for item in networks)
+    proxies = config.get("server", {}).get("trusted_proxies")
+    if proxies is not None:
+        env["NH_TRUSTED_PROXIES"] = ",".join(str(item) for item in proxies)
     return env
 
 
@@ -126,9 +136,12 @@ def _validate_config(config: dict[str, Any]) -> None:
     for name in ("port", "library_port"):
         if name in server and (not isinstance(server[name], int) or isinstance(server[name], bool) or not 1 <= server[name] <= 65535):
             raise ValueError(f"server.{name} must be an integer from 1 through 65535")
-    networks = server.get("allowed_networks")
-    if networks is not None and (not isinstance(networks, list) or not all(isinstance(item, str) for item in networks)):
-        raise ValueError("server.allowed_networks must be a list of CIDR strings")
+    for name in ("allowed_networks", "trusted_proxies"):
+        networks = server.get(name)
+        if networks is not None and (
+            not isinstance(networks, list) or not all(isinstance(item, str) for item in networks)
+        ):
+            raise ValueError(f"server.{name} must be a list of CIDR strings")
     media_servers = config.get("download", {}).get("media_servers")
     if media_servers is not None and (
         not isinstance(media_servers, list)

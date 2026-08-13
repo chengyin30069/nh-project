@@ -38,8 +38,33 @@ docker compose ps
 docker compose logs -f nh-server
 ```
 
-Compose 使用 Linux host networking，既有 nginx `127.0.0.1:8766` upstream 不必修改，也不會遇到不固定的
-Docker bridge subnet。下載 API 仍由 server 的 `allowed_networks` 驗證來源。
+Compose 發布主機的 `8765`、`8766` 到 Docker bridge。bridge subnet 每次重建可能改變，因此 server 會把
+`server.trusted_proxies` 中的連線端視為 reverse proxy，從 `X-Forwarded-For` 由右至左剝除可信代理後，
+再以最初的用戶 IP 對 `allowed_networks` 驗證。建議設定如下：
+
+```yaml
+server:
+  allowed_networks:
+    - "192.168.50.0/24"
+    - "100.64.0.0/10"
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "172.16.0.0/12"  # Docker 的 private bridge 範圍，不受單次 subnet 影響
+```
+
+nginx 的對應 location 必須傳入標準 header：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8766;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+不要把一般用戶網段放進 `trusted_proxies`；不可信連線送來的 `X-Forwarded-For` 會被忽略。
 
 若主機使用者不是 UID/GID 1000，啟動時指定：
 

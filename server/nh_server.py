@@ -175,6 +175,25 @@ def is_ip_allowed(address: str, networks: Iterable[ipaddress._BaseNetwork]) -> b
     return any(ip in network for network in networks)
 
 
+def resolve_client_ip(
+    peer_address: str,
+    forwarded_for: str | None,
+    trusted_proxies: Iterable[ipaddress._BaseNetwork],
+) -> str:
+    """Resolve an X-Forwarded-For chain only when the socket peer is trusted."""
+
+    if not forwarded_for or not is_ip_allowed(peer_address, trusted_proxies):
+        return peer_address
+    try:
+        chain = [str(ipaddress.ip_address(item.strip())) for item in forwarded_for.split(",")]
+        chain.append(str(ipaddress.ip_address(peer_address)))
+    except ValueError:
+        return peer_address
+    while len(chain) > 1 and is_ip_allowed(chain[-1], trusted_proxies):
+        chain.pop()
+    return chain[-1]
+
+
 def expand_path(value: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
 
@@ -1653,6 +1672,7 @@ class LocalLibrary:
 def make_handler(
     manager: DownloadManager,
     allowed_networks: tuple[ipaddress._BaseNetwork, ...],
+    trusted_proxies: tuple[ipaddress._BaseNetwork, ...] = (),
 ) -> type[BaseHTTPRequestHandler]:
     class NhRequestHandler(BaseHTTPRequestHandler):
         server_version = "NhDownloaderHTTP/1.0"
@@ -1766,7 +1786,12 @@ def make_handler(
             return payload
 
         def _is_allowed(self) -> bool:
-            return is_ip_allowed(self.client_address[0], allowed_networks)
+            return is_ip_allowed(self._client_ip(), allowed_networks)
+
+        def _client_ip(self) -> str:
+            return resolve_client_ip(
+                self.client_address[0], self.headers.get("X-Forwarded-For"), trusted_proxies
+            )
 
         def _origin_allowed(self) -> bool:
             origin = self.headers.get("Origin")
@@ -1790,7 +1815,7 @@ def make_handler(
                 pass
 
         def log_message(self, fmt: str, *args: object) -> None:
-            print(f"{self.address_string()} - {fmt % args}")
+            print(f"{self._client_ip()} - {fmt % args}")
 
     return NhRequestHandler
 
@@ -1798,6 +1823,7 @@ def make_handler(
 def make_library_handler(
     library: LocalLibrary,
     allowed_networks: tuple[ipaddress._BaseNetwork, ...],
+    trusted_proxies: tuple[ipaddress._BaseNetwork, ...] = (),
 ) -> type[BaseHTTPRequestHandler]:
     class NhLibraryRequestHandler(BaseHTTPRequestHandler):
         server_version = "NhLocalLibraryHTTP/1.0"
@@ -2012,7 +2038,12 @@ def make_library_handler(
             self._send_json(result, status=HTTPStatus.CONFLICT if result.get("blocked") else HTTPStatus.OK)
 
         def _is_allowed(self) -> bool:
-            return is_ip_allowed(self.client_address[0], allowed_networks)
+            return is_ip_allowed(self._client_ip(), allowed_networks)
+
+        def _client_ip(self) -> str:
+            return resolve_client_ip(
+                self.client_address[0], self.headers.get("X-Forwarded-For"), trusted_proxies
+            )
 
         def _send_html(
             self,
@@ -2094,7 +2125,7 @@ def make_library_handler(
                 pass
 
         def log_message(self, fmt: str, *args: object) -> None:
-            print(f"{self.address_string()} - {fmt % args}")
+            print(f"{self._client_ip()} - {fmt % args}")
 
     return NhLibraryRequestHandler
 
@@ -2215,6 +2246,13 @@ def build_arg_parser(env: dict[str, str] | None = None) -> argparse.ArgumentPars
         default=None,
         help="CIDR allowed to use the API. Repeatable.",
     )
+    parser.add_argument(
+        "--trusted-proxy",
+        action="append",
+        dest="trusted_proxies",
+        default=None,
+        help="Reverse-proxy CIDR trusted to supply X-Forwarded-For. Repeatable.",
+    )
     return parser
 
 
@@ -2265,6 +2303,10 @@ def main() -> None:
         item.strip() for item in env.get("NH_ALLOWED_NETWORKS", "").split(",") if item.strip()
     ]
     networks = parse_networks(args.allowed_networks or configured_networks or DEFAULT_ALLOWED_NETWORKS)
+    configured_proxies = [
+        item.strip() for item in env.get("NH_TRUSTED_PROXIES", "").split(",") if item.strip()
+    ]
+    trusted_proxies = parse_networks(args.trusted_proxies or configured_proxies)
     library = LocalLibrary(
         manager, env=env, cache_autostart=not maintenance_mode, index_autostart=not maintenance_mode
     )
@@ -2290,8 +2332,8 @@ def main() -> None:
             library.database.index_archive(archive, metadata=metadata, source_name="upstream")
             print(f"refreshed metadata for {gallery_id}")
         return
-    handler = make_handler(manager, networks)
-    library_handler = make_library_handler(library, networks)
+    handler = make_handler(manager, networks, trusted_proxies)
+    library_handler = make_library_handler(library, networks, trusted_proxies)
 
     httpd = ThreadingHTTPServer((args.host, args.port), handler)
     library_host = args.library_host or args.host
@@ -2301,6 +2343,7 @@ def main() -> None:
     print(f"nh downloader server listening on http://{args.host}:{args.port}")
     print(f"nh local library server listening on http://{library_host}:{args.library_port}")
     print("allowed networks:", ", ".join(str(network) for network in networks))
+    print("trusted proxies:", ", ".join(str(network) for network in trusted_proxies) or "none")
     try:
         httpd.serve_forever()
     finally:
