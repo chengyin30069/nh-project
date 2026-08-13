@@ -5,14 +5,16 @@ services:
       dockerfile: server.Dockerfile
     image: nh-project-server:local
     restart: unless-stopped
-    network_mode: host
     user: "${NH_UID:-1000}:${NH_GID:-1000}"
+    ports:
+      - "8765:8765"
+      - "8766:8766"
     environment:
-      HOME: "${HOME}"
+      HOME: /home/nh
       PYTHONUNBUFFERED: "1"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ${HOME}/nh:${HOME}/nh
+      - ~/nh:/home/nh/nh
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8765/health"]
       interval: 30s
