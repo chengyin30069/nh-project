@@ -22,7 +22,9 @@ from server.nh_server import (
     is_valid_gallery_id,
     make_library_handler,
     make_handler,
+    normalize_base_path,
     parse_networks,
+    prefix_html_paths,
     resolve_client_ip,
 )
 
@@ -33,6 +35,19 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(is_valid_gallery_id("abc"))
         self.assertFalse(is_valid_gallery_id("123/456"))
         self.assertFalse(is_valid_gallery_id(123456))
+
+    def test_base_path_is_normalized_and_html_paths_are_prefixed(self):
+        self.assertEqual(normalize_base_path("/nh/"), "/nh")
+        self.assertEqual(normalize_base_path("/"), "")
+        with self.assertRaises(ValueError):
+            normalize_base_path("nh")
+        rendered = prefix_html_paths(
+            '<a href="/g/1/"><img src="/media/1/1.jpg"></a><a href="https://example.com/">external</a>',
+            "/nh",
+        )
+        self.assertIn('href="/nh/g/1/"', rendered)
+        self.assertIn('src="/nh/media/1/1.jpg"', rendered)
+        self.assertIn('href="https://example.com/"', rendered)
 
     def test_allowed_networks(self):
         networks = parse_networks(DEFAULT_ALLOWED_NETWORKS)
@@ -703,6 +718,20 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertEqual(library.preview_fetches, [("galleries/999/1.webp", 1)])
             self.assertFalse((storage / "123456.cbz").exists())
 
+    def test_reader_keyboard_navigation_uses_base_prefixed_anchor_urls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(manager, {})
+
+            rendered = prefix_html_paths(
+                library._reader_shell_html("123456", 2, 3, "/media/123456/2.jpg", None, preview=False),
+                "/nh",
+            )
+
+            self.assertIn('id="nh-reader-prev" href="/nh/g/123456/1/"', rendered)
+            self.assertIn('id="nh-reader-next" href="/nh/g/123456/3/"', rendered)
+            self.assertIn("document.getElementById('nh-reader-prev').href", rendered)
+
     def test_download_catalog_is_newest_first_and_paginated(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp)
@@ -885,6 +914,57 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertEqual(random_response.status, 200)
             self.assertEqual(random_response.getheader("Cache-Control"), "no-store")
             self.assertEqual(random_body.count('class="gallery"'), 5)
+
+    def test_library_base_path_routes_assets_html_api_and_redirects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
+            library = StubLibrary(
+                manager,
+                {
+                    "/": '<html><head></head><body><a href="/g/123456/"><img src="/logo.svg"></a></body></html>',
+                    "/search/?q=test": ("<html></html>", "/search?q=test"),
+                },
+            )
+            handler = make_library_handler(library, parse_networks(["127.0.0.1/32"]), base_path="/nh")
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+
+            def request(method, path, body=None, headers=None):
+                conn = HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+                conn.request(method, path, body=body, headers=headers or {})
+                response = conn.getresponse()
+                payload = response.read()
+                conn.close()
+                return response, payload
+
+            try:
+                outside, _ = request("GET", "/")
+                home, home_body = request("GET", "/nh/")
+                asset, asset_body = request("GET", "/nh/_nh-local/assets/local.js")
+                api_payload = json.dumps({"ids": ["123456"]}).encode()
+                api, _ = request(
+                    "POST",
+                    "/nh/_nh-local/api/galleries/status",
+                    body=api_payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                redirect, _ = request("GET", "/nh/search/?q=test")
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
+            rendered = home_body.decode()
+            self.assertEqual(outside.status, 404)
+            self.assertEqual(home.status, 200)
+            self.assertIn('href="/nh/g/123456/"', rendered)
+            self.assertIn('src="/nh/logo.svg"', rendered)
+            self.assertEqual(asset.status, 200)
+            self.assertIn(b"BASE_PATH", asset_body)
+            self.assertEqual(api.status, 200)
+            self.assertEqual(redirect.status, 302)
+            self.assertEqual(redirect.getheader("Location"), "/nh/search?q=test")
 
 
 if __name__ == "__main__":

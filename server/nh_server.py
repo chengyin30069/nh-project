@@ -66,6 +66,10 @@ LOCAL_CATALOG_PAGE_SIZE = 50
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 WINDOW_GALLERY_RE = re.compile(r"window\._gallery\s*=\s*JSON\.parse\((?P<value>\"(?:\\.|[^\"\\])*\")\)")
 INTERNAL_HREF_RE = re.compile(r'(?P<prefix>\s(?:href|action)=["\'])(?P<url>/(?!/)[^"\']*)(?P<suffix>["\'])', re.IGNORECASE)
+ROOT_URL_ATTRIBUTE_RE = re.compile(
+    r'(?P<prefix>\s(?:href|src|action|poster|data-upstream-href|data-local-href)\s*=\s*["\'])(?P<url>/(?!/)[^"\']*)(?P<suffix>["\'])',
+    re.IGNORECASE,
+)
 ABS_NHENTAI_HREF_RE = re.compile(
     r'(?P<prefix>\s(?:href|action)=["\'])https://nhentai\.net(?P<url>/[^"\']*)(?P<suffix>["\'])',
     re.IGNORECASE,
@@ -132,7 +136,7 @@ LOCAL_UI_CSS = r"""
 .nh-local-modal{position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;padding:18px;background:#000a}
 .nh-local-dialog{width:min(440px,100%);border-radius:8px;padding:18px;background:#202327;color:#f6f7f8;box-shadow:0 18px 46px #000b;font:14px/1.45 system-ui,sans-serif}
 .nh-local-dialog h2{margin:0 0 10px;font-size:18px}.nh-local-dialog p{overflow-wrap:anywhere}.nh-local-actions{display:flex;justify-content:flex-end;gap:8px}.nh-local-actions button{min-height:34px;border:0;border-radius:4px;padding:0 12px;color:#fff;font-weight:700;cursor:pointer}.nh-local-cancel{background:#555d66}.nh-local-confirm{background:#b73535}
-a[href^="/login"],a[href^="/register"],a[href^="/favorites"],a[href^="/upload"]{display:none!important}
+a[href*="/login"],a[href*="/register"],a[href*="/favorites"],a[href*="/upload"]{display:none!important}
 iframe,.advertisement,.adsbyexoclick,.ad-container{display:none!important}
 """
 
@@ -162,6 +166,36 @@ LOCAL_UI_JS = r"""
 
 def is_valid_gallery_id(value: object) -> bool:
     return isinstance(value, str) and bool(GALLERY_ID_RE.fullmatch(value))
+
+
+def normalize_base_path(value: str | None) -> str:
+    """Return a canonical URL mount path, or an empty string for root."""
+
+    value = (value or "").strip()
+    if value in {"", "/"}:
+        return ""
+    if not value.startswith("/") or value.startswith("//"):
+        raise ValueError("base path must start with exactly one slash")
+    if "?" in value or "#" in value or any(part in {".", ".."} for part in value.split("/")):
+        raise ValueError("base path must not contain a query, fragment, or dot segment")
+    return value.rstrip("/")
+
+
+def add_base_path(value: str, base_path: str) -> str:
+    if not base_path or not value.startswith("/") or value.startswith("//"):
+        return value
+    if value == base_path or value.startswith(f"{base_path}/"):
+        return value
+    return f"{base_path}{value}"
+
+
+def prefix_html_paths(source: str, base_path: str) -> str:
+    if not base_path:
+        return source
+    return ROOT_URL_ATTRIBUTE_RE.sub(
+        lambda match: f"{match.group('prefix')}{add_base_path(match.group('url'), base_path)}{match.group('suffix')}",
+        source,
+    )
 
 
 def parse_networks(values: Iterable[str]) -> tuple[ipaddress._BaseNetwork, ...]:
@@ -1686,12 +1720,12 @@ class LocalLibrary:
             "nav{position:sticky;top:0;z-index:2;padding:12px;background:#111e}a{color:#8cc8ff;margin:0 12px}"
             "img{display:block;max-width:100%;height:auto;margin:auto}.nh-preview-label{color:#f5b942;margin-left:12px}</style>"
             "</head><body>"
-            f"{self._local_menu_html()}<nav><a href=\"{route_prefix}/{gallery_id}/\">Gallery</a><a href=\"{route_prefix}/{gallery_id}/{prev_page}/\">Prev</a>"
-            f"<span>{page_number} / {page_count}</span>{preview_label}<a href=\"{next_href}\">Next</a></nav>"
-            f'<a href="{next_href}" aria-label="Next page">{image}</a>'
+            f"{self._local_menu_html()}<nav><a href=\"{route_prefix}/{gallery_id}/\">Gallery</a><a id=\"nh-reader-prev\" href=\"{route_prefix}/{gallery_id}/{prev_page}/\">Prev</a>"
+            f"<span>{page_number} / {page_count}</span>{preview_label}<a id=\"nh-reader-next\" href=\"{route_prefix}/{gallery_id}/{next_page}/\">Next</a></nav>"
+            f'<a href="{route_prefix}/{gallery_id}/{next_page}/" aria-label="Next page">{image}</a>'
             "<script>document.addEventListener('keydown',function(e){"
-            f"if(e.key==='ArrowLeft')location.href='{route_prefix}/{gallery_id}/{prev_page}/';"
-            f"if(e.key==='ArrowRight')location.href='{next_href}';"
+            "if(e.key==='ArrowLeft')location.href=document.getElementById('nh-reader-prev').href;"
+            "if(e.key==='ArrowRight')location.href=document.getElementById('nh-reader-next').href;"
             "});</script></body></html>"
         )
 
@@ -1858,7 +1892,10 @@ def make_library_handler(
     library: LocalLibrary,
     allowed_networks: tuple[ipaddress._BaseNetwork, ...],
     trusted_proxies: tuple[ipaddress._BaseNetwork, ...] = (),
+    base_path: str = "",
 ) -> type[BaseHTTPRequestHandler]:
+    base_path = normalize_base_path(base_path)
+
     class NhLibraryRequestHandler(BaseHTTPRequestHandler):
         server_version = "NhLocalLibraryHTTP/1.0"
 
@@ -1874,7 +1911,10 @@ def make_library_handler(
                 return
 
             parsed = urlparse(self.path)
-            path = parsed.path
+            path = self._route_path(parsed.path)
+            if path is None:
+                self._send_text("not found", status=HTTPStatus.NOT_FOUND)
+                return
             query = f"?{parsed.query}" if parsed.query else ""
 
             if path == f"{LOCAL_ASSET_PREFIX}/local.css":
@@ -2031,7 +2071,10 @@ def make_library_handler(
             if not self._is_allowed():
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
-            path = urlparse(self.path).path
+            path = self._route_path(urlparse(self.path).path)
+            if path is None:
+                self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                return
             if path not in {
                 f"{LOCAL_API_PREFIX}/download",
                 f"{LOCAL_API_PREFIX}/galleries/status",
@@ -2084,7 +2127,10 @@ def make_library_handler(
             if not self._is_allowed():
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
-            path = urlparse(self.path).path
+            path = self._route_path(urlparse(self.path).path)
+            if path is None:
+                self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                return
             prefix = f"{LOCAL_API_PREFIX}/galleries/"
             if not path.startswith(prefix):
                 self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
@@ -2099,6 +2145,16 @@ def make_library_handler(
         def _is_allowed(self) -> bool:
             return is_ip_allowed(self._client_ip(), allowed_networks)
 
+        @staticmethod
+        def _route_path(path: str) -> str | None:
+            if not base_path:
+                return path
+            if path == base_path:
+                return "/"
+            if path.startswith(f"{base_path}/"):
+                return path[len(base_path):]
+            return None
+
         def _client_ip(self) -> str:
             return resolve_client_ip(
                 self.client_address[0], self.headers.get("X-Forwarded-For"), trusted_proxies
@@ -2111,6 +2167,7 @@ def make_library_handler(
             *,
             extra_headers: dict[str, str] | None = None,
         ) -> None:
+            payload = prefix_html_paths(payload, base_path)
             self._send_bytes(payload.encode("utf-8"), "text/html; charset=utf-8", status=status, extra_headers=extra_headers)
 
         def _send_text(self, payload: str, status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -2125,11 +2182,14 @@ def make_library_handler(
 
         def _send_proxy(self, response: ProxyResponse) -> None:
             extra_headers = {"X-NH-Cache": "stale"} if response.stale else None
-            self._send_bytes(response.data, response.content_type, status=response.status, extra_headers=extra_headers)
+            data = response.data
+            if base_path and response.content_type.lower().startswith("text/html"):
+                data = prefix_html_paths(data.decode("utf-8"), base_path).encode("utf-8")
+            self._send_bytes(data, response.content_type, status=response.status, extra_headers=extra_headers)
 
         def _send_redirect(self, location: str, *, no_store: bool = False) -> None:
             self.send_response(HTTPStatus.FOUND)
-            self.send_header("Location", location)
+            self.send_header("Location", add_base_path(location, base_path))
             self.send_header("Content-Length", "0")
             self.send_header("Cache-Control", "no-store" if no_store else "private, max-age=900")
             self.end_headers()
@@ -2267,6 +2327,11 @@ def build_arg_parser(env: dict[str, str] | None = None) -> argparse.ArgumentPars
     parser.add_argument("--port", type=int, default=int(env.get("NH_SERVER_PORT", "8765")))
     parser.add_argument("--library-host", default=env.get("NH_LIBRARY_HOST"))
     parser.add_argument("--library-port", type=int, default=int(env.get("NH_LIBRARY_PORT", "8766")))
+    parser.add_argument(
+        "--base-path",
+        default=env.get("NH_BASE_PATH", ""),
+        help="public URL prefix for the library server, for example /nh",
+    )
     parser.add_argument("--cookie-file", default=env.get("NH_COOKIE_FILE"), help="legacy cookie.sh file")
     parser.add_argument("--download-script", default=env.get("NH_DOWNLOAD_SCRIPT", str(PROJECT_ROOT / "nh2_requireCfToken.sh")))
     parser.add_argument("--storage-dir", default=env.get("NH_FOLDER_PATH"))
@@ -2392,7 +2457,11 @@ def main() -> None:
             print(f"refreshed metadata for {gallery_id}")
         return
     handler = make_handler(manager, networks, trusted_proxies)
-    library_handler = make_library_handler(library, networks, trusted_proxies)
+    try:
+        base_path = normalize_base_path(args.base_path)
+    except ValueError as exc:
+        raise SystemExit(f"invalid --base-path: {exc}") from exc
+    library_handler = make_library_handler(library, networks, trusted_proxies, base_path)
 
     httpd = ThreadingHTTPServer((args.host, args.port), handler)
     library_host = args.library_host or args.host
@@ -2400,7 +2469,7 @@ def main() -> None:
     library_thread = threading.Thread(target=library_httpd.serve_forever, name="nh-local-library-server", daemon=True)
     library_thread.start()
     print(f"nh downloader server listening on http://{args.host}:{args.port}")
-    print(f"nh local library server listening on http://{library_host}:{args.library_port}")
+    print(f"nh local library server listening on http://{library_host}:{args.library_port}{base_path or '/'}")
     print("allowed networks:", ", ".join(str(network) for network in networks))
     print("trusted proxies:", ", ".join(str(network) for network in trusted_proxies) or "none")
     try:

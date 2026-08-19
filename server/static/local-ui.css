@@ -247,10 +247,10 @@
   .nh-catalog-pagination { flex-wrap: wrap; gap: 10px; }
 }
 
-a[href^="/login"],
-a[href^="/register"],
-a[href^="/favorites"],
-a[href^="/user/"],
+a[href*="/login"],
+a[href*="/register"],
+a[href*="/favorites"],
+a[href*="/user/"],
 form[action*="/comments"],
 button[aria-label*="favorite" i],
 button[aria-label*="vote" i],

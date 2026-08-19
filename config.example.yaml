@@ -8,6 +8,8 @@ server:
   port: 8765
   library_host: "0.0.0.0"
   library_port: 8766
+  # Public URL prefix when served behind a path-based reverse proxy.
+  base_path: "/nh"
   allowed_networks:
     - "127.0.0.1/32"
     - "192.168.50.0/24"

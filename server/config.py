@@ -14,6 +14,7 @@ CONFIG_KEYS = {
         "port",
         "library_host",
         "library_port",
+        "base_path",
         "allowed_networks",
         "trusted_proxies",
     },
@@ -38,6 +39,7 @@ ENV_FIELDS = {
     ("server", "port"): "NH_SERVER_PORT",
     ("server", "library_host"): "NH_LIBRARY_HOST",
     ("server", "library_port"): "NH_LIBRARY_PORT",
+    ("server", "base_path"): "NH_BASE_PATH",
     ("paths", "storage"): "NH_FOLDER_PATH",
     ("paths", "download_script"): "NH_DOWNLOAD_SCRIPT",
     ("paths", "legacy_cookie_file"): "NH_COOKIE_FILE",
@@ -136,6 +138,9 @@ def _validate_config(config: dict[str, Any]) -> None:
     for name in ("port", "library_port"):
         if name in server and (not isinstance(server[name], int) or isinstance(server[name], bool) or not 1 <= server[name] <= 65535):
             raise ValueError(f"server.{name} must be an integer from 1 through 65535")
+    base_path = server.get("base_path")
+    if base_path is not None and not isinstance(base_path, str):
+        raise ValueError("server.base_path must be a string")
     for name in ("allowed_networks", "trusted_proxies"):
         networks = server.get(name)
         if networks is not None and (

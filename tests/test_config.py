@@ -13,6 +13,7 @@ class ServerConfigTests(unittest.TestCase):
                 {
                     "auth": {"cookie": "a=b", "user_agent": "Browser"},
                     "server": {
+                        "base_path": "/nh",
                         "allowed_networks": ["127.0.0.1/32", "172.17.0.0/16"],
                         "trusted_proxies": ["127.0.0.1/32", "172.16.0.0/12"],
                     },
@@ -25,6 +26,7 @@ class ServerConfigTests(unittest.TestCase):
             self.assertEqual(env["NH_MEDIA_SERVER_LIST"], "1 3 5")
             self.assertEqual(env["NH_ALLOWED_NETWORKS"], "127.0.0.1/32,172.17.0.0/16")
             self.assertEqual(env["NH_TRUSTED_PROXIES"], "127.0.0.1/32,172.16.0.0/12")
+            self.assertEqual(env["NH_BASE_PATH"], "/nh")
             self.assertEqual(env["NH_FOLDER_PATH"], str(Path(tmp, "library").resolve()))
 
     def test_explicit_missing_config_is_rejected(self):

@@ -1,7 +1,9 @@
 (function () {
   "use strict";
 
-  const API = "/_nh-local/api";
+  const SCRIPT_PATH = new URL(document.currentScript?.src || "/_nh-local/assets/local.js", window.location.origin).pathname;
+  const BASE_PATH = SCRIPT_PATH.replace(/\/_nh-local\/assets\/local\.js$/, "");
+  const API = `${BASE_PATH}/_nh-local/api`;
   const GALLERY_PATH_RE = /^(?:\/downloads)?\/g\/([0-9]+)\/?$/;
   const TAXONOMY_PATH_RE = /^\/(tag|artist|character|parody|group|language|category)\/([^/]+)\/?$/;
   const TAXONOMY_MODE_KEY = "nh-taxonomy-link-mode";
@@ -14,7 +16,9 @@
 
   function parseGalleryIdFromUrl(value) {
     try {
-      return new URL(value, window.location.origin).pathname.match(GALLERY_PATH_RE)?.[1] || null;
+      const path = new URL(value, window.location.origin).pathname;
+      const routePath = BASE_PATH && path.startsWith(`${BASE_PATH}/`) ? path.slice(BASE_PATH.length) : path;
+      return routePath.match(GALLERY_PATH_RE)?.[1] || null;
     } catch {
       return null;
     }
@@ -142,11 +146,11 @@
       try {
         await request(`/galleries/${galleryId}`, { method: "DELETE" });
         hideDeleteModal();
-        if (window.location.pathname.startsWith("/downloads/g/")) {
-          window.location.assign("/downloads/");
+        if (window.location.pathname.startsWith(`${BASE_PATH}/downloads/g/`)) {
+          window.location.assign(`${BASE_PATH}/downloads/`);
           return;
         }
-        if (window.location.pathname.startsWith("/downloads/")) {
+        if (window.location.pathname.startsWith(`${BASE_PATH}/downloads/`)) {
           window.location.reload();
           return;
         }
@@ -198,7 +202,7 @@
   }
 
   async function addGalleryPageButton(version) {
-    const galleryId = window.location.pathname.match(GALLERY_PATH_RE)?.[1];
+    const galleryId = window.location.pathname.slice(BASE_PATH.length).match(GALLERY_PATH_RE)?.[1];
     if (!galleryId || document.getElementById("nh-downloader-button")) return;
 
     const button = createDownloadButton(galleryId, "nh-inline-download-button", "Download");
@@ -297,7 +301,10 @@
 
   function removeUnsupportedUi() {
     document.querySelectorAll("iframe,.advertisement,.adsbyexoclick,.ad-container").forEach((element) => element.remove());
-    document.querySelectorAll('a[href^="/login"],a[href^="/register"],a[href^="/favorites"],a[href^="/user/"],form[action*="/comments"],button[aria-label*="favorite" i],button[aria-label*="vote" i],button[aria-label*="suggest" i]').forEach((element) => element.remove());
+    const accountLinks = ["login", "register", "favorites", "user/"]
+      .map((path) => `a[href^="${BASE_PATH}/${path}"]`)
+      .join(",");
+    document.querySelectorAll(`${accountLinks},form[action*="/comments"],button[aria-label*="favorite" i],button[aria-label*="vote" i],button[aria-label*="suggest" i]`).forEach((element) => element.remove());
   }
 
   function applyTaxonomyMode(mode) {
@@ -355,8 +362,9 @@
   }
 
   function setupTaxonomyToggle() {
-    if (!window.location.pathname.match(GALLERY_PATH_RE)) return;
-    const localGallery = window.location.pathname.startsWith("/downloads/g/");
+    const routePath = window.location.pathname.slice(BASE_PATH.length);
+    if (!routePath.match(GALLERY_PATH_RE)) return;
+    const localGallery = routePath.startsWith("/downloads/g/");
     const storageKey = `${TAXONOMY_MODE_KEY}:${localGallery ? "downloads" : "proxy"}`;
     const defaultMode = localGallery ? "local" : "upstream";
     const missingLocalCounts = [];
@@ -364,10 +372,11 @@
       let url;
       try { url = new URL(link.getAttribute("href"), window.location.origin); } catch { continue; }
       if (url.origin !== window.location.origin) continue;
-      const match = url.pathname.match(TAXONOMY_PATH_RE);
+      const taxonomyPath = BASE_PATH && url.pathname.startsWith(`${BASE_PATH}/`) ? url.pathname.slice(BASE_PATH.length) : url.pathname;
+      const match = taxonomyPath.match(TAXONOMY_PATH_RE);
       if (!match) continue;
-      link.dataset.upstreamHref = `${url.pathname}${url.search}${url.hash}`;
-      link.dataset.localHref = `/downloads/${match[1]}/${match[2]}/`;
+      link.dataset.upstreamHref = `${BASE_PATH}${taxonomyPath}${url.search}${url.hash}`;
+      link.dataset.localHref = `${BASE_PATH}/downloads/${match[1]}/${match[2]}/`;
       link.classList.add("nh-taxonomy-link");
       const count = link.querySelector(".count, .nh-taxonomy-count");
       if (count) {
@@ -425,7 +434,7 @@
   }
 
   function localControlsAreMissing() {
-    if (window.location.pathname.match(GALLERY_PATH_RE)) {
+    if (window.location.pathname.slice(BASE_PATH.length).match(GALLERY_PATH_RE)) {
       return !document.getElementById("nh-downloader-button");
     }
     const cards = findGalleryCards();
