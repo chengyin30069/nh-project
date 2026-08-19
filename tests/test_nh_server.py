@@ -42,11 +42,14 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_base_path("nh")
         rendered = prefix_html_paths(
-            '<a href="/g/1/"><img src="/media/1/1.jpg"></a><a href="https://example.com/">external</a>',
+            '<a href="/g/1/"><img src="/media/1/1.jpg" '
+            'data-nh-fallback-src="/catalog-thumbnail/1"></a>'
+            '<a href="https://example.com/">external</a>',
             "/nh",
         )
         self.assertIn('href="/nh/g/1/"', rendered)
         self.assertIn('src="/nh/media/1/1.jpg"', rendered)
+        self.assertIn('data-nh-fallback-src="/nh/catalog-thumbnail/1"', rendered)
         self.assertIn('href="https://example.com/"', rendered)
 
     def test_allowed_networks(self):
@@ -758,6 +761,8 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertEqual(first.count('class="gallery"'), 50)
             self.assertIn("Title 100052", first)
             self.assertIn("nh-catalog-site-header", first)
+            self.assertIn('data-nh-fallback-src="/catalog-thumbnail/100052"', first)
+            self.assertIn('this.src=this.dataset.nhFallbackSrc', first)
             self.assertNotIn("Title 100001", first)
             self.assertIn('class="nh-page-jump"', first)
             self.assertIn('name="page" min="1" max="2" value="1"', first)
@@ -779,6 +784,7 @@ class LocalLibraryTests(unittest.TestCase):
 
             self.assertEqual(rendered.count('class="gallery"'), 5)
             self.assertNotIn('class="nh-page-jump"', rendered)
+            self.assertIn('src="/catalog-thumbnail/', rendered)
             ids = re.findall(r'href="/downloads/g/([0-9]+)/"', rendered)
             self.assertEqual(len(set(ids)), 5)
             refreshed_ids = re.findall(r'href="/downloads/g/([0-9]+)/"', refreshed)
@@ -819,6 +825,12 @@ class LocalLibraryTests(unittest.TestCase):
                 response = conn.getresponse()
                 body = response.read()
                 conn.close()
+
+                thumbnail_conn = HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+                thumbnail_conn.request("GET", "/catalog-thumbnail/123456")
+                thumbnail_response = thumbnail_conn.getresponse()
+                thumbnail_body = thumbnail_response.read()
+                thumbnail_conn.close()
             finally:
                 httpd.shutdown()
                 httpd.server_close()
@@ -827,6 +839,9 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(body, b"image")
             self.assertEqual(response.getheader("Cache-Control"), "private, max-age=3600")
+            self.assertEqual(thumbnail_response.status, 200)
+            self.assertEqual(thumbnail_body, b"image")
+            self.assertEqual(thumbnail_response.getheader("Cache-Control"), "private, max-age=3600")
 
     def test_library_same_origin_status_api_and_local_asset(self):
         with tempfile.TemporaryDirectory() as tmp:

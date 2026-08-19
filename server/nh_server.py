@@ -57,6 +57,7 @@ LOCAL_TAXONOMY_RE = re.compile(
     r"^/downloads/(tag|artist|character|parody|group|language|category)/([^/]+)/?$"
 )
 MEDIA_RE = re.compile(r"^/media/([0-9]+)/([^/]+)$")
+CATALOG_THUMB_RE = re.compile(r"^/catalog-thumbnail/([0-9]+)$")
 PREVIEW_MEDIA_RE = re.compile(r"^/preview-media/([0-9]+)/([0-9]+)$")
 PREVIEW_THUMB_RE = re.compile(r"^/preview-thumbnail/([0-9]+)/([0-9]+)$")
 LOCAL_API_PREFIX = "/_nh-local/api"
@@ -67,7 +68,7 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 WINDOW_GALLERY_RE = re.compile(r"window\._gallery\s*=\s*JSON\.parse\((?P<value>\"(?:\\.|[^\"\\])*\")\)")
 INTERNAL_HREF_RE = re.compile(r'(?P<prefix>\s(?:href|action)=["\'])(?P<url>/(?!/)[^"\']*)(?P<suffix>["\'])', re.IGNORECASE)
 ROOT_URL_ATTRIBUTE_RE = re.compile(
-    r'(?P<prefix>\s(?:href|src|action|poster|data-upstream-href|data-local-href)\s*=\s*["\'])(?P<url>/(?!/)[^"\']*)(?P<suffix>["\'])',
+    r'(?P<prefix>\s(?:href|src|action|poster|data-upstream-href|data-local-href|data-nh-fallback-src)\s*=\s*["\'])(?P<url>/(?!/)[^"\']*)(?P<suffix>["\'])',
     re.IGNORECASE,
 )
 ABS_NHENTAI_HREF_RE = re.compile(
@@ -1190,6 +1191,10 @@ class LocalLibrary:
     def media_path(self, gallery_id: str, filename: str) -> Path | None:
         return next((path for path in self._gallery_images(gallery_id) if path.name == filename), None)
 
+    def catalog_thumbnail_path(self, gallery_id: str) -> Path | None:
+        images = self._gallery_images(gallery_id)
+        return images[0] if images else None
+
     def rewrite_html(self, source: str, *, stale: bool = False) -> str:
         source = re.sub(r"<meta\b[^>]*(?:delegate-ch|tsyndicate|exoclick)[^>]*>", "", source, flags=re.IGNORECASE)
         source = re.sub(
@@ -1538,7 +1543,14 @@ class LocalLibrary:
             gallery_id = html.escape(str(record["id"]))
             gallery_title = html.escape(str(record["title"]))
             cover_url = html.escape(str(record.get("cover_url") or ""))
-            image = f'<img loading="lazy" src="{cover_url}" alt="{gallery_title}">' if cover_url else '<div class="nh-catalog-placeholder">No cover</div>'
+            local_thumbnail = f"/catalog-thumbnail/{gallery_id}"
+            image = (
+                f'<img loading="lazy" src="{cover_url}" alt="{gallery_title}" '
+                f'data-nh-fallback-src="{local_thumbnail}" '
+                'onerror="this.onerror=null;this.src=this.dataset.nhFallbackSrc;">'
+                if cover_url else
+                f'<img loading="lazy" src="{local_thumbnail}" alt="{gallery_title}">'
+            )
             cards.append(
                 f'<div class="gallery"><a class="cover" href="/downloads/g/{gallery_id}/">{image}'
                 f'<div class="caption">{gallery_title}</div></a></div>'
@@ -2003,6 +2015,15 @@ def make_library_handler(
                     self._send_text("not found", status=HTTPStatus.NOT_FOUND)
                 else:
                     self._send_html(rendered, extra_headers={"Cache-Control": "no-cache"})
+                return
+
+            catalog_thumbnail_match = CATALOG_THUMB_RE.fullmatch(path)
+            if catalog_thumbnail_match:
+                thumbnail_path = library.catalog_thumbnail_path(catalog_thumbnail_match.group(1))
+                if thumbnail_path is None:
+                    self._send_text("not found", status=HTTPStatus.NOT_FOUND)
+                    return
+                self._send_file(thumbnail_path, cache_control="private, max-age=3600")
                 return
 
             media_match = MEDIA_RE.fullmatch(path)
