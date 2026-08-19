@@ -98,14 +98,17 @@
     return button;
   }
 
-  function createDownloadedControls(galleryId, title) {
+  function createDownloadedControls(galleryId, title, showMarker = true) {
     const controls = document.createElement("div");
     controls.className = "nh-downloaded-controls";
-    const marker = document.createElement("div");
-    marker.className = "nh-downloaded-marker";
-    marker.textContent = "Downloaded";
-    marker.title = `Already downloaded "${galleryId}"`;
-    controls.append(marker, createDeleteButton(galleryId, title));
+    if (showMarker) {
+      const marker = document.createElement("div");
+      marker.className = "nh-downloaded-marker";
+      marker.textContent = "Downloaded";
+      marker.title = `Already downloaded "${galleryId}"`;
+      controls.appendChild(marker);
+    }
+    controls.appendChild(createDeleteButton(galleryId, title));
     return controls;
   }
 
@@ -266,7 +269,8 @@
       if (status.downloaded) {
         overlayTarget.querySelector(".nh-thumb-download-button")?.remove();
         if (!overlayTarget.querySelector(".nh-downloaded-controls")) {
-          overlayTarget.appendChild(createDownloadedControls(galleryId, getCardTitle(card, overlayTarget)));
+          const showMarker = !window.location.pathname.startsWith("/downloads/");
+          overlayTarget.appendChild(createDownloadedControls(galleryId, getCardTitle(card, overlayTarget), showMarker));
         }
       } else if (!overlayTarget.querySelector(".nh-thumb-download-button, .nh-downloaded-controls")) {
         const button = createDownloadButton(galleryId, "nh-thumb-download-button", "DL");

@@ -652,6 +652,20 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertEqual(media_path.read_bytes(), b"image")
             self.assertTrue((manager.local_extract_dir("123456") / ".images.json").exists())
 
+    def test_local_reader_returns_to_gallery_after_last_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            manager = DownloadManager(storage_dir=storage, autostart=False)
+            with zipfile.ZipFile(storage / "123456.cbz", "w") as zf:
+                zf.writestr("1.jpg", b"first")
+                zf.writestr("2.jpg", b"last")
+            library = StubLibrary(manager, {})
+
+            rendered = library.local_reader_html("123456", "2")
+
+            self.assertEqual(rendered.count('href="/downloads/g/123456/"'), 3)
+            self.assertIn("if(e.key==='ArrowRight')location.href='/downloads/g/123456/';", rendered)
+
     def test_reader_without_cbz_never_fetches_per_page_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
@@ -693,7 +707,7 @@ class LocalLibraryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp)
             manager = DownloadManager(storage_dir=storage, autostart=False)
-            for gallery_id in range(100001, 100028):
+            for gallery_id in range(100001, 100053):
                 title = f"Title {gallery_id}"
                 metadata = {"id": gallery_id, "title": {"pretty": title}}
                 source = (
@@ -712,8 +726,8 @@ class LocalLibraryTests(unittest.TestCase):
             first = library.downloaded_galleries_html(1)
             second = library.downloaded_galleries_html(2)
 
-            self.assertEqual(first.count('class="gallery"'), 25)
-            self.assertIn("Title 100027", first)
+            self.assertEqual(first.count('class="gallery"'), 50)
+            self.assertIn("Title 100052", first)
             self.assertIn("nh-catalog-site-header", first)
             self.assertNotIn("Title 100001", first)
             self.assertIn('class="nh-page-jump"', first)
@@ -735,6 +749,7 @@ class LocalLibraryTests(unittest.TestCase):
             refreshed = library.random_downloaded_html()
 
             self.assertEqual(rendered.count('class="gallery"'), 5)
+            self.assertNotIn('class="nh-page-jump"', rendered)
             ids = re.findall(r'href="/downloads/g/([0-9]+)/"', rendered)
             self.assertEqual(len(set(ids)), 5)
             refreshed_ids = re.findall(r'href="/downloads/g/([0-9]+)/"', refreshed)

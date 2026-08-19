@@ -62,6 +62,7 @@ PREVIEW_THUMB_RE = re.compile(r"^/preview-thumbnail/([0-9]+)/([0-9]+)$")
 LOCAL_API_PREFIX = "/_nh-local/api"
 LOCAL_ASSET_PREFIX = "/_nh-local/assets"
 MAX_JSON_BODY_BYTES = 64 * 1024
+LOCAL_CATALOG_PAGE_SIZE = 50
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 WINDOW_GALLERY_RE = re.compile(r"window\._gallery\s*=\s*JSON\.parse\((?P<value>\"(?:\\.|[^\"\\])*\")\)")
 INTERNAL_HREF_RE = re.compile(r'(?P<prefix>\s(?:href|action)=["\'])(?P<url>/(?!/)[^"\']*)(?P<suffix>["\'])', re.IGNORECASE)
@@ -886,11 +887,12 @@ class LocalLibrary:
         if record is None or not self.manager.archive_path(gallery_id).exists():
             return None
         images = self._gallery_images(gallery_id)
-        cover = (
+        cover_image = (
             f'<img class="nh-local-gallery-cover" src="/media/{gallery_id}/{quote(images[0].name)}" '
             f'alt="{html.escape(str(record["title"]))}">' if images else
             '<div class="nh-catalog-placeholder">No cover</div>'
         )
+        cover = f'<a class="nh-local-gallery-cover-link" href="/downloads/g/{gallery_id}/1/">{cover_image}</a>'
         detail_metadata: dict[str, object] = {}
         try:
             detail_metadata = self._detail_preview_metadata(gallery_id)
@@ -987,14 +989,14 @@ class LocalLibrary:
 
     def downloaded_galleries_html(self, page: int) -> str:
         self._index_for_synchronous_use()
-        records, total = self.database.downloaded(page=page)
-        page_count = max(1, (total + 24) // 25)
+        records, total = self.database.downloaded(page=page, per_page=LOCAL_CATALOG_PAGE_SIZE)
+        page_count = max(1, (total + LOCAL_CATALOG_PAGE_SIZE - 1) // LOCAL_CATALOG_PAGE_SIZE)
         page = max(1, min(page, page_count))
         if page > 1 and not records:
-            records, _total = self.database.downloaded(page=page)
+            records, _total = self.database.downloaded(page=page, per_page=LOCAL_CATALOG_PAGE_SIZE)
         return self._catalog_page_html(
             "Recently Downloaded", records, page=page, page_count=page_count,
-            base_path="/downloads/", show_page_jump=True,
+            base_path="/downloads/",
         )
 
     def random_downloaded_html(self) -> str:
@@ -1011,11 +1013,11 @@ class LocalLibrary:
     def local_search_html(self, query: str, page: int) -> str:
         self._index_for_synchronous_use()
         requested_page = page
-        records, total = self.database.search(query, page=requested_page)
-        page_count = max(1, (total + 24) // 25)
+        records, total = self.database.search(query, page=requested_page, per_page=LOCAL_CATALOG_PAGE_SIZE)
+        page_count = max(1, (total + LOCAL_CATALOG_PAGE_SIZE - 1) // LOCAL_CATALOG_PAGE_SIZE)
         page = max(1, min(requested_page, page_count))
         if page != requested_page:
-            records, _total = self.database.search(query, page=page)
+            records, _total = self.database.search(query, page=page, per_page=LOCAL_CATALOG_PAGE_SIZE)
         title = f'Search: "{query}"' if query else "All Downloads"
         base = f"/downloads/search/?q={quote(query)}"
         return self._catalog_page_html(title, records, page=page, page_count=page_count, base_path=base, search_query=query)
@@ -1023,13 +1025,17 @@ class LocalLibrary:
     def local_taxonomy_html(self, taxonomy_type: str, slug: str, page: int) -> str | None:
         self._index_for_synchronous_use()
         requested_page = page
-        name, records, total = self.database.taxonomy(taxonomy_type, slug, page=requested_page)
+        name, records, total = self.database.taxonomy(
+            taxonomy_type, slug, page=requested_page, per_page=LOCAL_CATALOG_PAGE_SIZE
+        )
         if name is None:
             return None
-        page_count = max(1, (total + 24) // 25)
+        page_count = max(1, (total + LOCAL_CATALOG_PAGE_SIZE - 1) // LOCAL_CATALOG_PAGE_SIZE)
         page = max(1, min(requested_page, page_count))
         if page != requested_page:
-            name, records, total = self.database.taxonomy(taxonomy_type, slug, page=page)
+            name, records, total = self.database.taxonomy(
+                taxonomy_type, slug, page=page, per_page=LOCAL_CATALOG_PAGE_SIZE
+            )
         return self._catalog_page_html(
             f"{taxonomy_type.title()}: {name}", records, page=page, page_count=page_count,
             base_path=f"/downloads/{taxonomy_type}/{quote(slug)}/",
@@ -1492,7 +1498,6 @@ class LocalLibrary:
         page_count: int | None = None,
         base_path: str = "/downloads/",
         search_query: str = "",
-        show_page_jump: bool = False,
     ) -> str:
         cards = []
         for record in records:
@@ -1515,13 +1520,18 @@ class LocalLibrary:
             links.append(f"<span>Page {page} / {page_count}</span>")
             if page < page_count:
                 links.append(f'<a href="{html.escape(base_path)}{separator}page={page + 1}">Next</a>')
-            if show_page_jump:
-                links.append(
-                    f'<form class="nh-page-jump" action="{html.escape(base_path)}" method="get">'
-                    f'<label>Page <input type="number" name="page" min="1" max="{page_count}" '
-                    f'value="{page}" inputmode="numeric" aria-label="Page number"></label>'
-                    '<button type="submit">Go</button></form>'
-                )
+            parsed_base = urlparse(base_path)
+            hidden_fields = "".join(
+                f'<input type="hidden" name="{html.escape(name)}" value="{html.escape(value)}">'
+                for name, values in parse_qs(parsed_base.query, keep_blank_values=True).items()
+                for value in values
+            )
+            links.append(
+                f'<form class="nh-page-jump" action="{html.escape(parsed_base.path)}" method="get">'
+                f'{hidden_fields}<label>Page <input type="number" name="page" min="1" max="{page_count}" '
+                f'value="{page}" inputmode="numeric" aria-label="Page number"></label>'
+                '<button type="submit">Go</button></form>'
+            )
             pagination = f'<nav class="nh-catalog-pagination">{"".join(links)}</nav>'
         return (
             "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -1661,6 +1671,11 @@ class LocalLibrary:
         title = f"Gallery {gallery_id} - page {page_number}"
         next_page = min(page_number + 1, page_count or page_number + 1)
         prev_page = max(page_number - 1, 1)
+        next_href = (
+            f"/downloads/g/{gallery_id}/"
+            if route_prefix == "/downloads/g" and page_count > 0 and page_number >= page_count
+            else f"{route_prefix}/{gallery_id}/{next_page}/"
+        )
         image = f'<img src="{html.escape(image_src)}" alt="{html.escape(title)}">' if image_src else "<p>Page image unavailable.</p>"
         preload = f'<link rel="preload" as="image" href="{html.escape(next_image_src)}">' if next_image_src else ""
         preview_label = '<span class="nh-preview-label">Temporary preview</span>' if preview else ""
@@ -1672,11 +1687,11 @@ class LocalLibrary:
             "img{display:block;max-width:100%;height:auto;margin:auto}.nh-preview-label{color:#f5b942;margin-left:12px}</style>"
             "</head><body>"
             f"{self._local_menu_html()}<nav><a href=\"{route_prefix}/{gallery_id}/\">Gallery</a><a href=\"{route_prefix}/{gallery_id}/{prev_page}/\">Prev</a>"
-            f"<span>{page_number} / {page_count}</span>{preview_label}<a href=\"{route_prefix}/{gallery_id}/{next_page}/\">Next</a></nav>"
-            f'<a href="{route_prefix}/{gallery_id}/{next_page}/" aria-label="Next page">{image}</a>'
+            f"<span>{page_number} / {page_count}</span>{preview_label}<a href=\"{next_href}\">Next</a></nav>"
+            f'<a href="{next_href}" aria-label="Next page">{image}</a>'
             "<script>document.addEventListener('keydown',function(e){"
             f"if(e.key==='ArrowLeft')location.href='{route_prefix}/{gallery_id}/{prev_page}/';"
-            f"if(e.key==='ArrowRight')location.href='{route_prefix}/{gallery_id}/{next_page}/';"
+            f"if(e.key==='ArrowRight')location.href='{next_href}';"
             "});</script></body></html>"
         )
 

@@ -203,6 +203,8 @@ class LibraryDatabaseTests(unittest.TestCase):
 
             self.assertIn('href="/downloads/g/123456/"', catalog)
             self.assertIn('action="/downloads/search/"', catalog)
+            self.assertIn('<input type="hidden" name="q" value="Local">', catalog)
+            self.assertIn('class="nh-page-jump"', catalog)
             self.assertIn('data-upstream-href="/artist/alice/"', detail)
             self.assertIn('data-local-href="/downloads/artist/alice/"', detail)
             self.assertIn('href="/downloads/artist/alice/"', detail)
@@ -210,7 +212,11 @@ class LibraryDatabaseTests(unittest.TestCase):
             self.assertIn('<h1>[Alice] Local title [Digital]</h1><h2>猫本</h2>', detail)
             self.assertIn('data-upstream-count="1001" data-local-count="1">1</span>', detail)
             self.assertIn('src="/preview-thumbnail/123456/1"', detail)
+            self.assertIn(
+                '<a class="nh-local-gallery-cover-link" href="/downloads/g/123456/1/">', detail
+            )
             self.assertIn('/downloads/g/123456/1/', reader)
+            self.assertEqual(reader.count('href="/downloads/g/123456/"'), 3)
 
     def test_content_thumbnail_is_fetched_from_cdn_once_then_cached(self):
         class ThumbnailLibrary(LocalLibrary):

@@ -80,6 +80,11 @@ Deno.test("controls survive hydration and match extension behavior", async () =>
     await page.locator(".nh-delete-button").click();
     assert((await page.locator(".nh-delete-target").textContent())?.includes("123456"));
 
+    await page.goto(`http://127.0.0.1:${port}/downloads/search/?q=fixture`);
+    await page.waitForTimeout(2100);
+    assertEquals(await page.locator(".nh-downloaded-marker").count(), 0);
+    assertEquals(await page.locator(".nh-delete-button").count(), 1);
+
     await page.goto(`http://127.0.0.1:${port}/g/654321/`);
     await page.waitForTimeout(2100);
     assertEquals(await page.locator("#nh-downloader-button").count(), 1);
