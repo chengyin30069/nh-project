@@ -682,7 +682,10 @@ class LocalLibraryTests(unittest.TestCase):
             rendered = library.local_reader_html("123456", "2")
 
             self.assertEqual(rendered.count('href="/downloads/g/123456/"'), 3)
-            self.assertIn("if(e.key==='ArrowRight')location.href='/downloads/g/123456/';", rendered)
+            self.assertIn(
+                "if(e.key==='ArrowRight')location.href=document.getElementById('nh-reader-next').href;",
+                rendered,
+            )
 
     def test_reader_without_cbz_never_fetches_per_page_html(self):
         with tempfile.TemporaryDirectory() as tmp:

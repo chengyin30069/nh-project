@@ -1733,8 +1733,8 @@ class LocalLibrary:
             "img{display:block;max-width:100%;height:auto;margin:auto}.nh-preview-label{color:#f5b942;margin-left:12px}</style>"
             "</head><body>"
             f"{self._local_menu_html()}<nav><a href=\"{route_prefix}/{gallery_id}/\">Gallery</a><a id=\"nh-reader-prev\" href=\"{route_prefix}/{gallery_id}/{prev_page}/\">Prev</a>"
-            f"<span>{page_number} / {page_count}</span>{preview_label}<a id=\"nh-reader-next\" href=\"{route_prefix}/{gallery_id}/{next_page}/\">Next</a></nav>"
-            f'<a href="{route_prefix}/{gallery_id}/{next_page}/" aria-label="Next page">{image}</a>'
+            f"<span>{page_number} / {page_count}</span>{preview_label}<a id=\"nh-reader-next\" href=\"{next_href}\">Next</a></nav>"
+            f'<a href="{next_href}" aria-label="Next page">{image}</a>'
             "<script>document.addEventListener('keydown',function(e){"
             "if(e.key==='ArrowLeft')location.href=document.getElementById('nh-reader-prev').href;"
             "if(e.key==='ArrowRight')location.href=document.getElementById('nh-reader-next').href;"
