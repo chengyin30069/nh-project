@@ -547,7 +547,7 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertNotIn("tsyndicate", rendered)
             self.assertNotIn("<iframe", rendered)
             self.assertNotIn('href="/login/"', rendered)
-            self.assertIn('a[href^="/login"]', LOCAL_UI_CSS_PATH.read_text())
+            self.assertIn('a[href*="/login"]', LOCAL_UI_CSS_PATH.read_text())
 
     def test_fresh_html_cache_avoids_second_upstream_fetch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -679,9 +679,9 @@ class LocalLibraryTests(unittest.TestCase):
                 zf.writestr("2.jpg", b"last")
             library = StubLibrary(manager, {})
 
-            rendered = library.local_reader_html("123456", "2")
+            rendered = library.reader_html("123456", "2")
 
-            self.assertEqual(rendered.count('href="/downloads/g/123456/"'), 3)
+            self.assertEqual(rendered.count('href="/g/123456/"'), 3)
             self.assertIn(
                 "if(e.key==='ArrowRight')location.href=document.getElementById('nh-reader-next').href;",
                 rendered,
@@ -788,7 +788,7 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertEqual(rendered.count('class="gallery"'), 5)
             self.assertNotIn('class="nh-page-jump"', rendered)
             self.assertIn('src="/catalog-thumbnail/', rendered)
-            ids = re.findall(r'href="/downloads/g/([0-9]+)/"', rendered)
+            ids = re.findall(r'href="/g/([0-9]+)/"', rendered)
             self.assertEqual(len(set(ids)), 5)
             refreshed_ids = re.findall(r'href="/downloads/g/([0-9]+)/"', refreshed)
             self.assertNotEqual(ids, refreshed_ids)

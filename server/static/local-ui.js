@@ -13,6 +13,7 @@
   let currentUrl = "";
   let renderVersion = 0;
   let renderTimers = [];
+  const badgeObservers = new Map();
 
   function parseGalleryIdFromUrl(value) {
     try {
@@ -146,8 +147,8 @@
       try {
         await request(`/galleries/${galleryId}`, { method: "DELETE" });
         hideDeleteModal();
-        if (window.location.pathname.startsWith(`${BASE_PATH}/downloads/g/`)) {
-          window.location.assign(`${BASE_PATH}/downloads/`);
+        if (parseGalleryIdFromUrl(window.location.href)) {
+          window.location.assign(`${BASE_PATH}/g/${galleryId}/`);
           return;
         }
         if (window.location.pathname.startsWith(`${BASE_PATH}/downloads/`)) {
@@ -242,8 +243,10 @@
     for (const link of document.querySelectorAll('a[href*="/g/"]')) {
       const galleryId = parseGalleryIdFromUrl(link.href);
       if (!galleryId || cards.has(galleryId)) continue;
+      if (GALLERY_PATH_RE.test(window.location.pathname.slice(BASE_PATH.length)) && !link.closest(".gallery, .thumb-container")) continue;
       const card = link.closest(".gallery") || link.closest(".thumb-container") || link.parentElement;
       if (!card || card === document.body) continue;
+      if (link.closest(".nh-local-gallery-page, #info") || link.classList.contains("nh-content-thumbnail")) continue;
       const overlayTarget = link.querySelector("img") ? link : card;
       cards.set(galleryId, { card, overlayTarget });
     }
@@ -257,8 +260,43 @@
   }
 
   async function renderThumbnailControls(version) {
+    for (const [img, observer] of badgeObservers) {
+      if (!img.isConnected) {
+        observer.disconnect();
+        badgeObservers.delete(img);
+      }
+    }
     const cards = findGalleryCards();
     if (cards.size === 0) return;
+    for (const [galleryId, { card, overlayTarget }] of cards) {
+      prepareOverlayTarget(galleryId, card, overlayTarget);
+      const titles = [card.dataset.nhTitles, getCardTitle(card, overlayTarget),
+        overlayTarget.getAttribute("title"), overlayTarget.querySelector("img")?.getAttribute("alt")].join("\n");
+      const marked = /decensored|uncensored|無碼|无码|無修正|モザイクなし/i.test(titles);
+      let badge = overlayTarget.querySelector(".nh-decensored-marker");
+      if (marked && !badge) {
+        badge = document.createElement("span");
+        badge.className = "nh-decensored-marker";
+        badge.textContent = "Decensored";
+        overlayTarget.appendChild(badge);
+      } else if (!marked) {
+        badge?.remove();
+      }
+      // Captions can share the cover anchor; anchor the badge to the image edge.
+      const img = overlayTarget.querySelector("img");
+      const positionBadge = () => {
+        if (badge && img) badge.style.top = `${img.offsetTop + img.offsetHeight - badge.offsetHeight - 6}px`;
+      };
+      positionBadge();
+      if (img && !badgeObservers.has(img)) {
+        const observer = new ResizeObserver(() => {
+          const marker = overlayTarget.querySelector(".nh-decensored-marker");
+          if (marker) marker.style.top = `${img.offsetTop + img.offsetHeight - marker.offsetHeight - 6}px`;
+        });
+        observer.observe(img);
+        badgeObservers.set(img, observer);
+      }
+    }
     let statuses = {};
     try {
       statuses = await getStatuses([...cards.keys()]);
@@ -273,7 +311,7 @@
       if (status.downloaded) {
         overlayTarget.querySelector(".nh-thumb-download-button")?.remove();
         if (!overlayTarget.querySelector(".nh-downloaded-controls")) {
-          const showMarker = !window.location.pathname.startsWith("/downloads/");
+          const showMarker = !window.location.pathname.startsWith(`${BASE_PATH}/downloads/`);
           overlayTarget.appendChild(createDownloadedControls(galleryId, getCardTitle(card, overlayTarget), showMarker));
         }
       } else if (!overlayTarget.querySelector(".nh-thumb-download-button, .nh-downloaded-controls")) {
@@ -291,7 +329,9 @@
   }
 
   function cleanupLocalUi() {
-    document.querySelectorAll("#nh-downloader-button, .nh-thumb-download-button, .nh-downloaded-controls, .nh-delete-button").forEach((element) => element.remove());
+    for (const observer of badgeObservers.values()) observer.disconnect();
+    badgeObservers.clear();
+    document.querySelectorAll("#nh-downloader-button, .nh-thumb-download-button, .nh-downloaded-controls, .nh-delete-button, .nh-decensored-marker, .nh-scope-toggle").forEach((element) => element.remove());
     document.querySelectorAll(".nh-downloader-card").forEach((element) => element.classList.remove("nh-downloader-card"));
     document.querySelectorAll(".nh-downloader-overlay-target").forEach((element) => {
       element.classList.remove("nh-downloader-overlay-target");
@@ -364,7 +404,7 @@
   function setupTaxonomyToggle() {
     const routePath = window.location.pathname.slice(BASE_PATH.length);
     if (!routePath.match(GALLERY_PATH_RE)) return;
-    const localGallery = routePath.startsWith("/downloads/g/");
+    const localGallery = document.body.dataset.nhDownloadedGallery === "true";
     const storageKey = `${TAXONOMY_MODE_KEY}:${localGallery ? "downloads" : "proxy"}`;
     const defaultMode = localGallery ? "local" : "upstream";
     const missingLocalCounts = [];
@@ -414,9 +454,35 @@
 
   function renderCurrentPage(version) {
     removeUnsupportedUi();
+    setupScopeToggle();
     setupTaxonomyToggle();
     addGalleryPageButton(version);
     renderThumbnailControls(version);
+  }
+
+  function setupScopeToggle() {
+    const route = window.location.pathname.slice(BASE_PATH.length);
+    const local = route.startsWith("/downloads/");
+    const upstreamPath = local ? route.slice("/downloads".length) : route;
+    if (!TAXONOMY_PATH_RE.test(upstreamPath) && !/^\/search\/?$/.test(upstreamPath)) return;
+    let control = document.querySelector(".nh-scope-toggle");
+    if (!control) {
+      control = document.createElement("nav");
+      control.className = "nh-scope-toggle";
+      control.setAttribute("aria-label", "Browse scope");
+      const target = document.querySelector(".nh-catalog-panel, #content, main") || document.body;
+      target.prepend(control);
+    }
+    const destination = new URL(`${BASE_PATH}${local ? "" : "/downloads"}${upstreamPath.replace(/\/?$/, "/")}`, window.location.origin);
+    if (/^\/search\/?$/.test(upstreamPath)) {
+      destination.searchParams.set("q", new URLSearchParams(window.location.search).get("q") || "");
+    }
+    control.replaceChildren();
+    control.append(document.createTextNode(local ? "Scope: Downloaded " : "Scope: All "));
+    const link = document.createElement("a");
+    link.href = destination.pathname + destination.search;
+    link.textContent = local ? "Show all" : "Show downloaded";
+    control.append(link);
   }
 
   function clearRenderTimers() {
@@ -434,6 +500,8 @@
   }
 
   function localControlsAreMissing() {
+    const scopePath = window.location.pathname.slice(BASE_PATH.length).replace(/^\/downloads\//, "/");
+    if ((TAXONOMY_PATH_RE.test(scopePath) || /^\/search\/?$/.test(scopePath)) && !document.querySelector(".nh-scope-toggle")) return true;
     if (window.location.pathname.slice(BASE_PATH.length).match(GALLERY_PATH_RE)) {
       return !document.getElementById("nh-downloader-button");
     }

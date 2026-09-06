@@ -10,13 +10,13 @@ function fixtureHtml(pathname: string): string {
     ? '<main id="info"><h1>Fixture Detail</h1><a class="btn" href="/download">Download</a><div id="tags"><a href="/artist/alice/">Alice <span class="count" title="123,456 galleries">123.5k</span></a></div></main>'
     : `<main><div class="gallery-grid">
         <div class="gallery"><a class="cover" href="/g/123456/"><img alt="Downloaded fixture"><div class="caption">Downloaded fixture</div></a></div>
-        <div class="gallery"><a class="cover" href="/g/654321/"><img alt="Remote fixture"><div class="caption">Remote fixture</div></a></div>
+        <div class="gallery"><a class="cover" href="/g/654321/"><img alt="Remote fixture [Uncensored]"><div class="caption">Remote fixture [Uncensored]</div></a></div>
       </div></main>`;
   const hydrated = detail
     ? '<h1>Fixture Detail</h1><a class="btn" href="/download">Download</a><div id="tags"><a href="/artist/alice/">Alice <span class="count" title="123,456 galleries">123.5k</span></a></div><button aria-label="Favorite gallery">Favorite</button>'
     : `<div class="gallery-grid">
         <div class="gallery"><a class="cover" href="/g/123456/"><img alt="Downloaded fixture"><div class="caption">Downloaded fixture</div></a></div>
-        <div class="gallery"><a class="cover" href="/g/654321/"><img alt="Remote fixture"><div class="caption">Remote fixture</div></a></div>
+        <div class="gallery"><a class="cover" href="/g/654321/"><img alt="Remote fixture [Uncensored]"><div class="caption">Remote fixture [Uncensored]</div></a></div>
       </div>`;
   return `<!doctype html><html><head><link rel="stylesheet" href="/_nh-local/assets/local.css">
     <script>document.addEventListener("click", (event) => {
@@ -28,7 +28,7 @@ function fixtureHtml(pathname: string): string {
       event.stopImmediatePropagation();
       window.location.assign(anchor.href);
     }, true);</script><script defer src="/_nh-local/assets/local.js"></script></head>
-    <body>${content}<script>setTimeout(() => { document.querySelector("${detail ? "#info" : "main"}").innerHTML = ${JSON.stringify(hydrated)}; }, 120);</script></body></html>`;
+    <body ${detail && pathname.includes("123456") ? 'data-nh-downloaded-gallery="true"' : ""}>${content}<script>setTimeout(() => { document.querySelector("${detail ? "#info" : "main"}").innerHTML = ${JSON.stringify(hydrated)}; }, 120);</script></body></html>`;
 }
 
 Deno.test("controls survive hydration and match extension behavior", async () => {
@@ -72,6 +72,8 @@ Deno.test("controls survive hydration and match extension behavior", async () =>
     assertEquals(await page.locator(".nh-downloaded-controls").count(), 1);
     assertEquals(await page.locator(".nh-thumb-download-button").count(), 1);
     assertEquals(await page.locator(".nh-thumb-download-button").textContent(), "DL");
+    assertEquals(await page.locator(".nh-decensored-marker").count(), 1);
+    assertEquals(await page.locator(".nh-scope-toggle a").getAttribute("href"), "/downloads/search/?q=fixture");
     const searchUrl = page.url();
     await page.locator(".nh-thumb-download-button").click();
     await page.waitForTimeout(100);
@@ -84,6 +86,10 @@ Deno.test("controls survive hydration and match extension behavior", async () =>
     await page.waitForTimeout(2100);
     assertEquals(await page.locator(".nh-downloaded-marker").count(), 0);
     assertEquals(await page.locator(".nh-delete-button").count(), 1);
+    assertEquals(await page.locator(".nh-decensored-marker").count(), 1);
+    await page.evaluate(`history.pushState({}, '', '/downloads/artist/alice/?page=3');`);
+    await page.locator('.nh-scope-toggle a[href="/artist/alice/"]').waitFor();
+    assertEquals(await page.locator(".nh-decensored-marker").count(), 1);
 
     await page.goto(`http://127.0.0.1:${port}/g/654321/`);
     await page.waitForTimeout(2100);
@@ -105,7 +111,7 @@ Deno.test("controls survive hydration and match extension behavior", async () =>
     assertEquals(await page.locator("[data-nh-taxonomy-toggle]").textContent(), "nhentai");
     assertEquals(await page.locator("#tags .count").textContent(), "123.5k");
 
-    await page.goto(`http://127.0.0.1:${port}/downloads/g/654321/`);
+    await page.goto(`http://127.0.0.1:${port}/g/123456/`);
     await page.waitForTimeout(2100);
     assertEquals(await page.locator("[data-nh-taxonomy-toggle]").textContent(), "Local");
     assertEquals(await page.locator("#tags a").getAttribute("href"), "/downloads/artist/alice/");

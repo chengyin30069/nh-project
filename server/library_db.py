@@ -13,6 +13,11 @@ import zipfile
 from pathlib import Path
 from typing import Callable
 
+try:
+    from server.search import normalize, words, load_aliases, query_terms, spelling_limit, close_spelling
+except ModuleNotFoundError:
+    from search import normalize, words, load_aliases, query_terms, spelling_limit, close_spelling
+
 
 GALLERY_TYPES = ("tag", "artist", "character", "parody", "group", "language", "category")
 WINDOW_GALLERY_RE = re.compile(r"window\._gallery\s*=\s*JSON\.parse\((?P<value>\"(?:\\.|[^\"\\])*\")\)")
@@ -91,6 +96,8 @@ class LibraryDatabase:
         self.path = storage_dir / ".nh-local" / "library.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._write_lock = threading.RLock()
+        alias_path = Path(os.environ.get("NH_SEARCH_ALIASES_FILE", str(storage_dir / ".nh-local" / "search-aliases.yaml")))
+        self.search_aliases = load_aliases(alias_path)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -187,6 +194,35 @@ class LibraryDatabase:
                 count_migration = True
             if count_migration:
                 db.execute("UPDATE galleries SET archive_mtime_ns=-1")
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS gallery_search (
+                    gallery_id INTEGER PRIMARY KEY REFERENCES galleries(id) ON DELETE CASCADE,
+                    document TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS gallery_search_terms (
+                    term TEXT NOT NULL,
+                    gallery_id INTEGER NOT NULL REFERENCES galleries(id) ON DELETE CASCADE,
+                    PRIMARY KEY(term,gallery_id)
+                );
+                CREATE INDEX IF NOT EXISTS search_terms_gallery ON gallery_search_terms(gallery_id);
+            """)
+            for row in db.execute("SELECT id FROM galleries WHERE id NOT IN (SELECT gallery_id FROM gallery_search)").fetchall():
+                self._update_search(db, row[0])
+
+    @staticmethod
+    def _update_search(db: sqlite3.Connection, gallery_id: int) -> None:
+        row = db.execute("SELECT title_english,title_japanese,title_pretty FROM galleries WHERE id=?", (gallery_id,)).fetchone()
+        if row is None:
+            return
+        fields = list(row)
+        for tag in db.execute("""SELECT t.name,t.slug FROM taxonomies t JOIN gallery_taxonomies gt
+            ON t.id=gt.taxonomy_id AND t.type=gt.taxonomy_type WHERE gt.gallery_id=?""", (gallery_id,)):
+            fields.extend(tag)
+        # A newline separates fields so quoted phrases cannot span unrelated metadata.
+        document = "\n".join(normalize(value) for value in fields)
+        db.execute("INSERT OR REPLACE INTO gallery_search VALUES(?,?)", (gallery_id, document))
+        db.execute("DELETE FROM gallery_search_terms WHERE gallery_id=?", (gallery_id,))
+        db.executemany("INSERT INTO gallery_search_terms VALUES(?,?)", ((term, gallery_id) for term in words(document)))
 
     @staticmethod
     def archive_source(archive: Path) -> str:
@@ -264,7 +300,7 @@ class LibraryDatabase:
                     media_id=excluded.media_id,title_english=excluded.title_english,
                     title_japanese=excluded.title_japanese,title_pretty=excluded.title_pretty,
                     cover_url=excluded.cover_url,cover_path=excluded.cover_path,
-                    downloaded_at=excluded.downloaded_at,archive_mtime_ns=excluded.archive_mtime_ns,
+                    archive_mtime_ns=excluded.archive_mtime_ns,
                     archive_size=excluded.archive_size,metadata_status=excluded.metadata_status,
                     metadata_source=excluded.metadata_source,indexed_at=excluded.indexed_at""",
                 (
@@ -284,6 +320,7 @@ class LibraryDatabase:
                 ),
             )
             db.execute("DELETE FROM gallery_taxonomies WHERE gallery_id=?", (gallery_id,))
+            affected_ids = {gallery_id}
             for position, tag in enumerate(tags):
                 if not isinstance(tag, dict) or str(tag.get("type")) not in GALLERY_TYPES:
                     continue
@@ -298,6 +335,13 @@ class LibraryDatabase:
                     slug = parts[1] if len(parts) > 1 else ""
                 if not slug:
                     slug = re.sub(r"[^a-z0-9]+", "-", str(tag["name"]).lower()).strip("-")
+                changed = db.execute("""SELECT id FROM taxonomies WHERE type=? AND (id=? OR slug=?)
+                    AND (name<>? OR slug<>?)""", (taxonomy_type, taxonomy_id, slug, str(tag["name"]), slug)).fetchall()
+                for changed_row in changed:
+                    affected_ids.update(row[0] for row in db.execute(
+                        "SELECT gallery_id FROM gallery_taxonomies WHERE taxonomy_type=? AND taxonomy_id=?",
+                        (taxonomy_type, changed_row[0]),
+                    ))
                 canonical_id = self._resolve_taxonomy(
                     db,
                     taxonomy_id,
@@ -317,6 +361,9 @@ class LibraryDatabase:
             db.execute(
                 "DELETE FROM taxonomies WHERE NOT EXISTS (SELECT 1 FROM gallery_taxonomies gt WHERE gt.taxonomy_id=taxonomies.id AND gt.taxonomy_type=taxonomies.type)"
             )
+            # Names can be updated on a shared taxonomy; refresh all affected records.
+            for affected_id in affected_ids:
+                self._update_search(db, affected_id)
 
     @staticmethod
     def _resolve_taxonomy(
@@ -506,33 +553,45 @@ class LibraryDatabase:
         finally:
             source.close()
 
-    def downloaded(self, *, page: int = 1, per_page: int = 25) -> tuple[list[dict[str, object]], int]:
-        return self._paged("SELECT * FROM galleries ORDER BY downloaded_at DESC,id DESC", (), page, per_page)
+    @staticmethod
+    def sort_order(sort: str) -> str:
+        return "g.downloaded_at DESC,g.id DESC" if sort == "downloaded" else "g.id DESC"
+
+    def downloaded(self, *, page: int = 1, per_page: int = 25, sort: str = "downloaded") -> tuple[list[dict[str, object]], int]:
+        return self._paged(f"SELECT g.* FROM galleries g ORDER BY {self.sort_order(sort)}", (), page, per_page)
 
     def random(self, limit: int = 5) -> list[dict[str, object]]:
         with self._connect() as db:
             return [self._record(row) for row in db.execute("SELECT * FROM galleries ORDER BY random() LIMIT ?", (limit,))]
 
-    def search(self, query: str, *, page: int = 1, per_page: int = 25) -> tuple[list[dict[str, object]], int]:
+    def search(self, query: str, *, page: int = 1, per_page: int = 25, sort: str = "id") -> tuple[list[dict[str, object]], int]:
         query = query.strip()
         if not query:
-            return self._paged("SELECT * FROM galleries ORDER BY id DESC", (), page, per_page)
-        escaped = query.replace('"', '""')
-        if len(query) >= 3:
-            sql = "SELECT g.* FROM gallery_titles_fts f JOIN galleries g ON g.id=f.rowid WHERE gallery_titles_fts MATCH ? ORDER BY g.id DESC"
-            try:
-                return self._paged(sql, (f'"{escaped}"',), page, per_page)
-            except sqlite3.OperationalError:
-                pass
-        pattern = f"%{query}%"
+            return self.downloaded(page=page, per_page=per_page, sort=sort)
+        literals, fuzzy = query_terms(query, self.search_aliases)
+        with self._connect() as db:
+            vocabulary = [row[0] for row in db.execute("SELECT DISTINCT term FROM gallery_search_terms")]
+        matches = set()
+        for term in fuzzy:
+            limit = spelling_limit(term)
+            if limit:
+                matches.update(word for word in vocabulary if spelling_limit(word) and close_spelling(term, word, limit))
+        clauses = []
+        params: list[object] = []
+        for term in sorted(literals):
+            clauses.append("s.document LIKE ? ESCAPE '\\'")
+            params.append("%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+        # Exact term lookup uses the persistent vocabulary index after fuzzy expansion.
+        if matches:
+            clauses.append("g.id IN (SELECT gallery_id FROM gallery_search_terms WHERE term IN (" + ",".join("?" for _ in matches) + "))")
+            params.extend(sorted(matches))
         return self._paged(
-            """SELECT * FROM galleries WHERE title_english LIKE ? COLLATE NOCASE
-            OR title_japanese LIKE ? OR title_pretty LIKE ? COLLATE NOCASE ORDER BY id DESC""",
-            (pattern, pattern, pattern), page, per_page,
+            f"SELECT g.* FROM galleries g JOIN gallery_search s ON s.gallery_id=g.id WHERE ({' OR '.join(clauses) or '0'}) ORDER BY {self.sort_order(sort)}",
+            tuple(params), page, per_page,
         )
 
     def taxonomy(
-        self, taxonomy_type: str, slug: str, *, page: int = 1, per_page: int = 25
+        self, taxonomy_type: str, slug: str, *, page: int = 1, per_page: int = 25, sort: str = "id"
     ) -> tuple[str | None, list[dict[str, object]], int]:
         if taxonomy_type not in GALLERY_TYPES:
             return None, [], 0
@@ -541,7 +600,7 @@ class LibraryDatabase:
         if taxonomy is None:
             return None, [], 0
         sql = """SELECT g.* FROM gallery_taxonomies gt JOIN galleries g ON g.id=gt.gallery_id
-        WHERE gt.taxonomy_type=? AND gt.taxonomy_id=? ORDER BY g.id DESC"""
+        WHERE gt.taxonomy_type=? AND gt.taxonomy_id=?""" + f" ORDER BY {self.sort_order(sort)}"
         records, total = self._paged(sql, (taxonomy_type, taxonomy["id"]), page, per_page)
         return str(taxonomy["name"]), records, total
 

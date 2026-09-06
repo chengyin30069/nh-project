@@ -905,6 +905,10 @@ class LocalLibrary:
             self.indexer.index_now(repair_remote=False)
 
     def gallery_html(self, gallery_id: str) -> str:
+        if self.manager.archive_path(gallery_id).exists():
+            rendered = self.local_gallery_html(gallery_id)
+            if rendered is not None:
+                return rendered
         cache_path = self.manager.local_html_dir(gallery_id) / "cover_page.html"
         try:
             source, stale = self._cached_html(cache_path, f"/g/{gallery_id}/")
@@ -919,6 +923,9 @@ class LocalLibrary:
     def local_gallery_html(self, gallery_id: str) -> str | None:
         self._index_for_synchronous_use()
         record = self.database.gallery(gallery_id)
+        if record is None and self.manager.archive_path(gallery_id).exists():
+            self.database.index_archive(self.manager.archive_path(gallery_id))
+            record = self.database.gallery(gallery_id)
         if record is None or not self.manager.archive_path(gallery_id).exists():
             return None
         images = self._gallery_images(gallery_id)
@@ -927,7 +934,7 @@ class LocalLibrary:
             f'alt="{html.escape(str(record["title"]))}">' if images else
             '<div class="nh-catalog-placeholder">No cover</div>'
         )
-        cover = f'<a class="nh-local-gallery-cover-link" href="/downloads/g/{gallery_id}/1/">{cover_image}</a>'
+        cover = f'<a class="nh-local-gallery-cover-link" href="/g/{gallery_id}/1/">{cover_image}</a>'
         detail_metadata: dict[str, object] = {}
         try:
             detail_metadata = self._detail_preview_metadata(gallery_id)
@@ -973,7 +980,7 @@ class LocalLibrary:
         if detail_metadata:
             pages = detail_metadata.get("pages") if isinstance(detail_metadata.get("pages"), list) else []
             preview_cards = "".join(
-                f'<a class="nh-content-thumbnail" href="/downloads/g/{gallery_id}/{number}/">'
+                f'<a class="nh-content-thumbnail" href="/g/{gallery_id}/{number}/">'
                 f'<img loading="lazy" src="/preview-thumbnail/{gallery_id}/{number}" alt="Page {number}"></a>'
                 for item in pages if isinstance(item, dict)
                 for number in [item.get("number")]
@@ -985,13 +992,13 @@ class LocalLibrary:
         return (
             '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{title}</title><link rel="stylesheet" href="/_nh-local/assets/local.css">'
-            '<script defer src="/_nh-local/assets/local.js"></script></head><body class="nh-catalog-body">'
+            '<script defer src="/_nh-local/assets/local.js"></script></head><body class="nh-catalog-body" data-nh-downloaded-gallery="true">'
             f'{self._local_menu_html()}{self._catalog_site_header_html()}'
             '<main class="nh-local-gallery-page"><section class="nh-local-gallery-panel">'
             f'<div class="nh-local-gallery-cover-wrap">{cover}</div><div id="info" class="nh-local-gallery-info">'
             f'<h1>{title}</h1>{subtitle}<p class="nh-local-gallery-id">#{gallery_id}</p>{pending}'
             '<div class="nh-taxonomy-mode"><span>Tag links:</span><button type="button" data-nh-taxonomy-toggle>Local</button></div>'
-            f'<div class="nh-local-tags">{rows}</div><p><a class="nh-local-reader-button" href="/downloads/g/{gallery_id}/1/">Read locally</a></p>'
+            f'<div class="nh-local-tags">{rows}</div><p><a class="nh-local-reader-button" href="/g/{gallery_id}/1/">Read locally</a></p>'
             '</div></section>'
             f'<section class="nh-content-preview"><h2>Preview</h2><div class="nh-content-preview-grid">{preview_cards}</div></section>'
             '</main></body></html>'
@@ -1001,7 +1008,7 @@ class LocalLibrary:
         if self.manager.archive_path(gallery_id).exists():
             images = self._gallery_images(gallery_id)
             local_image = next((path for path in images if path.stem == page), None)
-            return self._local_reader_html(gallery_id, page, images, local_image, local=False)
+            return self._local_reader_html(gallery_id, page, images, local_image)
         try:
             metadata = self._preview_metadata(gallery_id)
             pages = metadata.get("pages", [])
@@ -1015,23 +1022,18 @@ class LocalLibrary:
         except Exception as exc:
             return self._preview_unavailable_html(gallery_id, str(exc))
 
-    def local_reader_html(self, gallery_id: str, page: str) -> str | None:
-        if not self.manager.archive_path(gallery_id).exists():
-            return None
-        images = self._gallery_images(gallery_id)
-        local_image = next((path for path in images if path.stem == page), None)
-        return self._local_reader_html(gallery_id, page, images, local_image, local=True)
-
-    def downloaded_galleries_html(self, page: int) -> str:
+    def downloaded_galleries_html(self, page: int, sort: str = "downloaded") -> str:
         self._index_for_synchronous_use()
-        records, total = self.database.downloaded(page=page, per_page=LOCAL_CATALOG_PAGE_SIZE)
+        sort = sort if sort in {"id", "downloaded"} else "downloaded"
+        requested_page = page
+        records, total = self.database.downloaded(page=page, per_page=LOCAL_CATALOG_PAGE_SIZE, sort=sort)
         page_count = max(1, (total + LOCAL_CATALOG_PAGE_SIZE - 1) // LOCAL_CATALOG_PAGE_SIZE)
         page = max(1, min(page, page_count))
-        if page > 1 and not records:
-            records, _total = self.database.downloaded(page=page, per_page=LOCAL_CATALOG_PAGE_SIZE)
+        if page != requested_page:
+            records, _total = self.database.downloaded(page=page, per_page=LOCAL_CATALOG_PAGE_SIZE, sort=sort)
         return self._catalog_page_html(
-            "Recently Downloaded", records, page=page, page_count=page_count,
-            base_path="/downloads/",
+            "Downloads", records, page=page, page_count=page_count,
+            base_path=f"/downloads/?sort={sort}", sort=sort,
         )
 
     def random_downloaded_html(self) -> str:
@@ -1045,35 +1047,38 @@ class LocalLibrary:
             self._last_random_ids = current_ids
         return self._catalog_page_html("Random 5 Downloads", records)
 
-    def local_search_html(self, query: str, page: int) -> str:
+    def local_search_html(self, query: str, page: int, sort: str = "id") -> str:
         self._index_for_synchronous_use()
+        sort = sort if sort in {"id", "downloaded"} else "id"
         requested_page = page
-        records, total = self.database.search(query, page=requested_page, per_page=LOCAL_CATALOG_PAGE_SIZE)
+        records, total = self.database.search(query, page=requested_page, per_page=LOCAL_CATALOG_PAGE_SIZE, sort=sort)
         page_count = max(1, (total + LOCAL_CATALOG_PAGE_SIZE - 1) // LOCAL_CATALOG_PAGE_SIZE)
         page = max(1, min(requested_page, page_count))
         if page != requested_page:
-            records, _total = self.database.search(query, page=page, per_page=LOCAL_CATALOG_PAGE_SIZE)
+            records, _total = self.database.search(query, page=page, per_page=LOCAL_CATALOG_PAGE_SIZE, sort=sort)
         title = f'Search: "{query}"' if query else "All Downloads"
-        base = f"/downloads/search/?q={quote(query)}"
-        return self._catalog_page_html(title, records, page=page, page_count=page_count, base_path=base, search_query=query)
+        base = f"/downloads/search/?q={quote(query)}&sort={sort}"
+        return self._catalog_page_html(title, records, page=page, page_count=page_count, base_path=base, search_query=query, sort=sort)
 
-    def local_taxonomy_html(self, taxonomy_type: str, slug: str, page: int) -> str | None:
+    def local_taxonomy_html(self, taxonomy_type: str, slug: str, page: int, sort: str = "id") -> str | None:
         self._index_for_synchronous_use()
+        sort = sort if sort in {"id", "downloaded"} else "id"
         requested_page = page
         name, records, total = self.database.taxonomy(
-            taxonomy_type, slug, page=requested_page, per_page=LOCAL_CATALOG_PAGE_SIZE
+            taxonomy_type, slug, page=requested_page, per_page=LOCAL_CATALOG_PAGE_SIZE, sort=sort
         )
         if name is None:
-            return None
+            name = slug.replace("-", " ")
         page_count = max(1, (total + LOCAL_CATALOG_PAGE_SIZE - 1) // LOCAL_CATALOG_PAGE_SIZE)
         page = max(1, min(requested_page, page_count))
         if page != requested_page:
             name, records, total = self.database.taxonomy(
-                taxonomy_type, slug, page=page, per_page=LOCAL_CATALOG_PAGE_SIZE
+                taxonomy_type, slug, page=page, per_page=LOCAL_CATALOG_PAGE_SIZE, sort=sort
             )
+            name = name or slug.replace("-", " ")
         return self._catalog_page_html(
             f"{taxonomy_type.title()}: {name}", records, page=page, page_count=page_count,
-            base_path=f"/downloads/{taxonomy_type}/{quote(slug)}/",
+            base_path=f"/downloads/{taxonomy_type}/{quote(slug)}/?sort={sort}", sort=sort,
         )
 
     def preview_media_path(self, gallery_id: str, page: str) -> Path | None:
@@ -1537,11 +1542,13 @@ class LocalLibrary:
         page_count: int | None = None,
         base_path: str = "/downloads/",
         search_query: str = "",
+        sort: str | None = None,
     ) -> str:
         cards = []
         for record in records:
             gallery_id = html.escape(str(record["id"]))
             gallery_title = html.escape(str(record["title"]))
+            search_titles = html.escape("\n".join(str(record.get(key) or "") for key in ("title_english", "title_japanese", "title_pretty")), quote=True)
             cover_url = html.escape(str(record.get("cover_url") or ""))
             local_thumbnail = f"/catalog-thumbnail/{gallery_id}"
             image = (
@@ -1552,12 +1559,22 @@ class LocalLibrary:
                 f'<img loading="lazy" src="{local_thumbnail}" alt="{gallery_title}">'
             )
             cards.append(
-                f'<div class="gallery"><a class="cover" href="/downloads/g/{gallery_id}/">{image}'
+                f'<div class="gallery" data-nh-titles="{search_titles}"><a class="cover" href="/g/{gallery_id}/">{image}'
                 f'<div class="caption">{gallery_title}</div></a></div>'
             )
         if not cards:
             cards.append('<p class="nh-catalog-empty">No downloaded galleries found.</p>')
         pagination = ""
+        sort_controls = ""
+        if sort is not None:
+            route = urlparse(base_path).path
+            query_part = f"q={quote(search_query)}&" if route == "/downloads/search/" else ""
+            sort_controls = '<nav class="nh-catalog-sort" aria-label="Sort downloads">Sort: ' + "".join(
+                f'<a href="{html.escape(route)}?{html.escape(query_part)}sort={value}"'
+                + (' aria-current="true"' if value == sort else '')
+                + f'>{label}</a>'
+                for value, label in (("id", "ID ↓"), ("downloaded", "Downloaded ↓"))
+            ) + '</nav>'
         if page is not None and page_count is not None:
             links = []
             separator = "&amp;" if "?" in base_path else "?"
@@ -1586,7 +1603,7 @@ class LocalLibrary:
             "</head><body class=\"nh-catalog-body\">"
             f"{self._local_menu_html()}{self._catalog_site_header_html(search_query)}"
             f'<main class="nh-catalog-page"><section class="nh-catalog-panel"><h1><span aria-hidden="true">▰</span> {html.escape(title)}</h1>'
-            f'<div class="nh-catalog-grid">{"".join(cards)}</div>{pagination}</section></main></body></html>'
+            f'{sort_controls}<div class="nh-catalog-grid">{"".join(cards)}</div>{pagination}</section></main></body></html>'
         )
 
     def _catalog_site_header_html(self, query: str = "") -> str:
@@ -1690,7 +1707,7 @@ class LocalLibrary:
         )
 
     def _local_reader_html(
-        self, gallery_id: str, page: str, images: list[Path], image_path: Path | None, *, local: bool
+        self, gallery_id: str, page: str, images: list[Path], image_path: Path | None
     ) -> str:
         image_src = f"/media/{gallery_id}/{quote(image_path.name)}" if image_path else None
         page_count = len(images)
@@ -1700,7 +1717,6 @@ class LocalLibrary:
         next_src = f"/media/{gallery_id}/{quote(next_image.name)}" if next_image and next_page != page_number else None
         return self._reader_shell_html(
             gallery_id, page_number, page_count, image_src, next_src, preview=False,
-            route_prefix="/downloads/g" if local else "/g",
         )
 
     def _reader_shell_html(
@@ -1712,15 +1728,14 @@ class LocalLibrary:
         next_image_src: str | None,
         *,
         preview: bool,
-        route_prefix: str = "/g",
     ) -> str:
         title = f"Gallery {gallery_id} - page {page_number}"
         next_page = min(page_number + 1, page_count or page_number + 1)
         prev_page = max(page_number - 1, 1)
         next_href = (
-            f"/downloads/g/{gallery_id}/"
-            if route_prefix == "/downloads/g" and page_count > 0 and page_number >= page_count
-            else f"{route_prefix}/{gallery_id}/{next_page}/"
+            f"/g/{gallery_id}/"
+            if page_count > 0 and page_number >= page_count
+            else f"/g/{gallery_id}/{next_page}/"
         )
         image = f'<img src="{html.escape(image_src)}" alt="{html.escape(title)}">' if image_src else "<p>Page image unavailable.</p>"
         preload = f'<link rel="preload" as="image" href="{html.escape(next_image_src)}">' if next_image_src else ""
@@ -1732,7 +1747,7 @@ class LocalLibrary:
             "nav{position:sticky;top:0;z-index:2;padding:12px;background:#111e}a{color:#8cc8ff;margin:0 12px}"
             "img{display:block;max-width:100%;height:auto;margin:auto}.nh-preview-label{color:#f5b942;margin-left:12px}</style>"
             "</head><body>"
-            f"{self._local_menu_html()}<nav><a href=\"{route_prefix}/{gallery_id}/\">Gallery</a><a id=\"nh-reader-prev\" href=\"{route_prefix}/{gallery_id}/{prev_page}/\">Prev</a>"
+            f"{self._local_menu_html()}<nav><a href=\"/g/{gallery_id}/\">Gallery</a><a id=\"nh-reader-prev\" href=\"/g/{gallery_id}/{prev_page}/\">Prev</a>"
             f"<span>{page_number} / {page_count}</span>{preview_label}<a id=\"nh-reader-next\" href=\"{next_href}\">Next</a></nav>"
             f'<a href="{next_href}" aria-label="Next page">{image}</a>'
             "<script>document.addEventListener('keydown',function(e){"
@@ -1929,6 +1944,10 @@ def make_library_handler(
                 return
             query = f"?{parsed.query}" if parsed.query else ""
 
+            if LOCAL_GALLERY_PAGE_RE.fullmatch(path) or LOCAL_GALLERY_READER_RE.fullmatch(path):
+                self._send_redirect(path.removeprefix("/downloads").rstrip("/") + "/" + query, no_store=True)
+                return
+
             if path == f"{LOCAL_ASSET_PREFIX}/local.css":
                 self._send_file(LOCAL_UI_CSS_PATH)
                 return
@@ -1967,7 +1986,7 @@ def make_library_handler(
                     page = max(1, int(parse_qs(parsed.query).get("page", ["1"])[0]))
                 except ValueError:
                     page = 1
-                self._send_html(library.downloaded_galleries_html(page), extra_headers={"Cache-Control": "no-cache"})
+                self._send_html(library.downloaded_galleries_html(page, parse_qs(parsed.query).get("sort", ["downloaded"])[0]), extra_headers={"Cache-Control": "no-cache"})
                 return
             if path.rstrip("/") == "/downloads/random":
                 self._send_html(library.random_downloaded_html(), extra_headers={"Cache-Control": "no-store"})
@@ -1979,7 +1998,7 @@ def make_library_handler(
                 except ValueError:
                     page = 1
                 self._send_html(
-                    library.local_search_html(params.get("q", [""])[0], page),
+                    library.local_search_html(params.get("q", [""])[0], page, params.get("sort", ["id"])[0]),
                     extra_headers={"Cache-Control": "no-cache"},
                 )
                 return
@@ -1991,26 +2010,9 @@ def make_library_handler(
                 except ValueError:
                     page = 1
                 rendered = library.local_taxonomy_html(
-                    local_taxonomy_match.group(1), unquote(local_taxonomy_match.group(2)), page
+                    local_taxonomy_match.group(1), unquote(local_taxonomy_match.group(2)), page,
+                    parse_qs(parsed.query).get("sort", ["id"])[0],
                 )
-                if rendered is None:
-                    self._send_text("not found", status=HTTPStatus.NOT_FOUND)
-                else:
-                    self._send_html(rendered, extra_headers={"Cache-Control": "no-cache"})
-                return
-
-            local_gallery_match = LOCAL_GALLERY_PAGE_RE.fullmatch(path)
-            if local_gallery_match:
-                rendered = library.local_gallery_html(local_gallery_match.group(1))
-                if rendered is None:
-                    self._send_text("not found", status=HTTPStatus.NOT_FOUND)
-                else:
-                    self._send_html(rendered, extra_headers={"Cache-Control": "no-cache"})
-                return
-
-            local_reader_match = LOCAL_GALLERY_READER_RE.fullmatch(path)
-            if local_reader_match:
-                rendered = library.local_reader_html(*local_reader_match.groups())
                 if rendered is None:
                     self._send_text("not found", status=HTTPStatus.NOT_FOUND)
                 else:
@@ -2066,7 +2068,7 @@ def make_library_handler(
 
             gallery_match = GALLERY_PAGE_RE.fullmatch(path)
             if gallery_match:
-                self._send_html(library.gallery_html(gallery_match.group(1)))
+                self._send_html(library.gallery_html(gallery_match.group(1)), extra_headers={"Cache-Control": "no-cache"})
                 return
 
             reader_match = GALLERY_READER_RE.fullmatch(path)

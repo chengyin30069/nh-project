@@ -1,0 +1,8 @@
+# Copy to <storage>/.nh-local/search-aliases.yaml and restart the server.
+# Alternatively set NH_SEARCH_ALIASES_FILE to an explicit YAML path.
+# Every name in a group is interchangeable; overlapping groups are merged.
+# Example (replace these placeholders with your actual metadata names):
+# aliases:
+#   - ["角色中文名", "character romanized name", "キャラクター名"]
+#   - ["作者中文名", "artist name"]
+aliases: []

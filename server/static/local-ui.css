@@ -1,3 +1,40 @@
+.nh-decensored-marker {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  height: 24px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 4px;
+  background: #783db5;
+  color: #fff;
+  font: 700 12px/1 system-ui, sans-serif;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.nh-catalog-sort, .nh-scope-toggle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.nh-catalog-sort a, .nh-scope-toggle a {
+  display: inline-block;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: #333;
+  color: #fff;
+  text-decoration: none;
+}
+
+.nh-catalog-sort a[aria-current="true"] { background: #b51c40; }
+
 .nh-page-download-button,
 .nh-inline-download-button,
 .nh-thumb-download-button,

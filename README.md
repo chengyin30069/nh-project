@@ -78,34 +78,71 @@ It mirrors nhentai's public home, search, taxonomy, gallery, reader, random,
 info, and community pages while keeping navigation on the local server. Ads,
 tracking, popups, and account-only routes are removed. Gallery cards and detail
 pages get local download status plus download/delete controls. Thumbnails keep
-their original CDN URLs; full reader images are served only from local
-`{id}.cbz` archives. An undownloaded reader page shows a download prompt instead
-of loading remote full-size images. Downloaded galleries use a fully local
+their original CDN URLs; full reader images use local `{id}.cbz` archives when
+available and otherwise use the temporary preview cache. Downloaded galleries use a fully local
 reader: the CBZ is extracted once, a persistent image index avoids rescanning
 the directory on every request, and the next page image is preloaded. Reader
 navigation never fetches per-page HTML from nhentai.
 
-`/downloads/` lists downloaded galleries newest-first with 25 galleries per
+`/downloads/` lists downloaded galleries newest-first with 50 galleries per
 page, and `/downloads/random/` chooses five different downloaded galleries on
 every request. `/downloads/search/` searches downloaded English, Japanese, and
-Pretty titles, while `/downloads/{type}/{slug}/` browses local tags, artists,
-characters, parodies, groups, languages, and categories. Local cards open a
-fully local `/downloads/g/{id}/` detail page and reader. Undownloaded galleries
-can also be read through the proxy-side local reader:
+Pretty titles plus tag, artist, character, parody, group, language, and category
+names and slugs. `/downloads/{type}/{slug}/` browses those local classifications.
+All cards open `/g/{id}/`: downloaded galleries use a local detail page,
+and undownloaded galleries use the upstream proxy page. Old `/downloads/g/{id}/`
+and `/downloads/g/{id}/{page}/` links redirect to their `/g/` equivalents.
+Undownloaded galleries can also be read through the same local reader:
 gallery metadata is fetched once and full-size pages are proxied into a
 temporary 24-hour, 2 GiB LRU cache without creating a CBZ or marking the gallery
 as downloaded.
 
 Local detail pages show nhentai CDN content thumbnails that link to the local
 CBZ reader. Their taxonomy links default to the local database and display
-local downloaded-gallery counts; proxy detail pages continue to default to
+local downloaded-gallery counts; undownloaded detail pages continue to default to
 nhentai taxonomy links. Each mode is remembered separately per browser tab.
+Both local and temporary readers return to `/g/{id}/` after the last page,
+including Next, image clicks, and the right arrow key. Deleting from a detail
+page reloads that same gallery as an undownloaded page.
+
+The seven taxonomy result pages and search results have a **Show all / Show
+downloaded** scope switch. Switching keeps the category or search text and
+resets pagination and sorting. An uncollected local category displays an empty
+list with a switch back to the upstream results.
+
+Download lists, search results, and taxonomy results offer **ID ↓** (numeric)
+and **Downloaded ↓** sorting. `/downloads/` defaults to download time, all other
+lists default to ID; equal timestamps use descending ID. The `sort=id` or
+`sort=downloaded` query parameter persists through pagination, with no browser
+preference storage. Changing sorting returns to page 1. Random 5 is unchanged.
+
+Local search uses **OR** between keywords and can match different metadata
+fields; double quotes preserve a complete phrase. Matching normalizes case,
+full-width characters, whitespace and hyphens and supports partial strings.
+Every search also includes close Latin spellings: words of 4–7 letters allow
+one insertion, deletion, substitution or adjacent transposition, and words of
+8+ letters allow two. Short words and Chinese/Japanese use substring matching
+and explicit aliases. Results follow the selected sort, not relevance scores.
+
+For cross-language names, copy [`search-aliases.example.yaml`](search-aliases.example.yaml)
+to `<storage>/.nh-local/search-aliases.yaml` (normally `~/nh/.nh-local/search-aliases.yaml`),
+fill in groups of interchangeable names, and restart the server. The default
+alias table is empty; no translations are guessed. An optional
+`NH_SEARCH_ALIASES_FILE` environment variable selects another file. The file in
+the storage directory also works with the existing Docker storage mount.
+
+Gallery cards across both scopes display a purple **Decensored** label at the
+bottom left of the cover when their available titles contain `decensored`,
+`uncensored`, `無碼`, `无码`, `無修正`, or `モザイクなし` (case insensitive).
+This does not use tags and does not label detail covers or individual reader pages.
 
 Downloaded metadata is indexed in `~/nh/.nh-local/library.sqlite3`. Existing
 archives are indexed in the background without delaying server startup; CBZ
 metadata is preferred and only incomplete records are repaired from upstream,
 at no more than one request per second. Rebuild the index manually with
-`python3 server/nh_server.py --reindex-library`.
+`python3 server/nh_server.py --reindex-library`. On first startup after upgrading,
+the search documents and term index are built from existing SQLite metadata;
+this can add startup time for a large library but does not read or alter CBZ files.
 
 Cached HTML, read-only API responses, metadata, and extracted CBZ files live
 under `~/nh/.nh-local/`. HTML is fresh for 15 minutes, public API JSON is

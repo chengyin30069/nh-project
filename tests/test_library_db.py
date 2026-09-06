@@ -190,7 +190,7 @@ class LibraryDatabaseTests(unittest.TestCase):
             self.assertIsNone(database.gallery("200002"))
             self.assertIsNotNone(database.gallery("100001"))
 
-    def test_local_pages_use_separate_routes_and_no_upstream_html(self):
+    def test_local_pages_use_unified_routes_and_no_upstream_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp)
             write_gallery(storage, 123456, self.metadata(123456, "[Alice] Local title [Digital]"))
@@ -198,10 +198,10 @@ class LibraryDatabaseTests(unittest.TestCase):
             library = LocalLibrary(manager, cache_autostart=False)
 
             catalog = library.local_search_html("Local", 1)
-            detail = library.local_gallery_html("123456")
-            reader = library.local_reader_html("123456", "1")
+            detail = library.gallery_html("123456")
+            reader = library.reader_html("123456", "1")
 
-            self.assertIn('href="/downloads/g/123456/"', catalog)
+            self.assertIn('href="/g/123456/"', catalog)
             self.assertIn('action="/downloads/search/"', catalog)
             self.assertIn('<input type="hidden" name="q" value="Local">', catalog)
             self.assertIn('class="nh-page-jump"', catalog)
@@ -213,10 +213,11 @@ class LibraryDatabaseTests(unittest.TestCase):
             self.assertIn('data-upstream-count="1001" data-local-count="1">1</span>', detail)
             self.assertIn('src="/preview-thumbnail/123456/1"', detail)
             self.assertIn(
-                '<a class="nh-local-gallery-cover-link" href="/downloads/g/123456/1/">', detail
+                '<a class="nh-local-gallery-cover-link" href="/g/123456/1/">', detail
             )
-            self.assertIn('/downloads/g/123456/1/', reader)
-            self.assertEqual(reader.count('href="/downloads/g/123456/"'), 3)
+            self.assertIn('/g/123456/1/', reader)
+            self.assertEqual(reader.count('href="/g/123456/"'), 3)
+            self.assertIn('data-nh-downloaded-gallery="true"', detail)
 
     def test_content_thumbnail_is_fetched_from_cdn_once_then_cached(self):
         class ThumbnailLibrary(LocalLibrary):
