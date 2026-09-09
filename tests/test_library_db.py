@@ -215,8 +215,9 @@ class LibraryDatabaseTests(unittest.TestCase):
             self.assertIn(
                 '<a class="nh-local-gallery-cover-link" href="/g/123456/1/">', detail
             )
-            self.assertIn('/g/123456/1/', reader)
-            self.assertEqual(reader.count('href="/g/123456/"'), 3)
+            self.assertIn('src="/media/123456/1.jpg"', reader)
+            self.assertIn('id="nh-reader-prev" href="/g/123456/"', reader)
+            self.assertIn('id="nh-reader-next" href="/g/123456/"', reader)
             self.assertIn('data-nh-downloaded-gallery="true"', detail)
 
     def test_content_thumbnail_is_fetched_from_cdn_once_then_cached(self):

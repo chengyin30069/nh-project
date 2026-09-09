@@ -13,7 +13,7 @@ thus provides a faster and safer download experience, all you need to do is prov
 browser agent version in the script
 
 Current architecture, routes, metadata indexing, deployment state, and new-session
-handoff notes are maintained in [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md).
+handoff notes are maintained in [`project.md`](project.md).
 YAML configuration, Docker server deployment, and SQLite-only library restoration
 are documented in [`doc/docker_server.md`](doc/docker_server.md).
 
@@ -102,7 +102,9 @@ CBZ reader. Their taxonomy links default to the local database and display
 local downloaded-gallery counts; undownloaded detail pages continue to default to
 nhentai taxonomy links. Each mode is remembered separately per browser tab.
 Both local and temporary readers return to `/g/{id}/` after the last page,
-including Next, image clicks, and the right arrow key. Deleting from a detail
+including Next, clicks on the image's right half, and the right arrow key. On
+page 1, Prev, clicks on the image's left half, and the left arrow key return
+to the gallery. Deleting from a detail
 page reloads that same gallery as an undownloaded page.
 
 The seven taxonomy result pages and search results have a **Show all / Show
@@ -115,6 +117,30 @@ and **Downloaded ↓** sorting. `/downloads/` defaults to download time, all oth
 lists default to ID; equal timestamps use descending ID. The `sort=id` or
 `sort=downloaded` query parameter persists through pagination, with no browser
 preference storage. Changing sorting returns to page 1. Random 5 is unchanged.
+
+The downloaded library also has seven classification directories at
+`/downloads/tags/`, `artists/`, `characters/`, `parodies/`, `groups/`,
+`languages/`, and `categories/`. They show local gallery counts, name/slug
+search, count or name sorting, and 100 classifications per page. Library
+navigation links to these local directories; **Show all / Show downloaded**
+switches between the corresponding directories.
+
+Gallery cards display full titles with equal heights within each row, including
+after upstream hydration. Chinese language flags use 🇹🇼, English 🇬🇧, and
+Japanese 🇯🇵. Downloaded cards derive their language prefixes from SQLite;
+multiple known languages are shown together. Downloaded cards and details show
+**Delete** without an additional green Downloaded label. The Firefox extension
+retains its existing UI.
+
+Both downloaded and temporary readers share a compact dark toolbar with
+**Fit page** and **Original size** options. Fit page shows the entire image
+within the remaining viewport without enlarging small images. Original size
+allows scrolling at the image's natural dimensions. The last choice is saved
+in localStorage per deployment path and shared across books and browser tabs.
+Click the left half of the image to go back, or the right half to go forward;
+the split follows the image even when scrolling in Original size. A numeric
+page input immediately after the page counter accepts a page from 1 to the
+total; press Enter or Go to jump. Card titles retain their original fonts.
 
 Local search uses **OR** between keywords and can match different metadata
 fields; double quotes preserve a complete phrase. Matching normalizes case,

@@ -427,7 +427,7 @@ class LocalLibraryTests(unittest.TestCase):
     def test_rewrite_links_preserves_cdn_images(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = DownloadManager(storage_dir=Path(tmp), autostart=False)
-            library = LocalLibrary(manager)
+            library = LocalLibrary(manager, cache_autostart=False)
 
             html = (
                 "<html><head></head><body>"
@@ -682,10 +682,8 @@ class LocalLibraryTests(unittest.TestCase):
             rendered = library.reader_html("123456", "2")
 
             self.assertEqual(rendered.count('href="/g/123456/"'), 3)
-            self.assertIn(
-                "if(e.key==='ArrowRight')location.href=document.getElementById('nh-reader-next').href;",
-                rendered,
-            )
+            self.assertIn('id="nh-reader-next" href="/g/123456/"', rendered)
+            self.assertIn('src="/_nh-local/assets/local.js"', rendered)
 
     def test_reader_without_cbz_never_fetches_per_page_html(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -696,6 +694,19 @@ class LocalLibraryTests(unittest.TestCase):
 
             self.assertIn("Preview unavailable", rendered)
             self.assertEqual(library.fetches, ["/api/v2/galleries/123456"])
+
+    def test_reader_first_page_returns_to_gallery_and_jump_has_valid_bounds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library = StubLibrary(DownloadManager(storage_dir=Path(tmp), autostart=False), {})
+            for preview in (False, True):
+                rendered = prefix_html_paths(library._reader_shell_html(
+                    "123456", 1, 8, "/media/123456/1.jpg", None, preview=preview,
+                ), "/nh")
+                self.assertIn('id="nh-reader-prev" href="/nh/g/123456/"', rendered)
+                self.assertIn('class="nh-reader-jump" action="/nh/g/123456/"', rendered)
+                self.assertIn('min="1" max="8" step="1" value="1"', rendered)
+                self.assertLess(rendered.index('nh-reader-progress'), rendered.index('nh-reader-jump'))
+                self.assertLess(rendered.index('nh-reader-jump'), rendered.index('id="nh-reader-next"'))
 
     def test_undownloaded_reader_uses_cached_metadata_and_preview_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -736,7 +747,8 @@ class LocalLibraryTests(unittest.TestCase):
 
             self.assertIn('id="nh-reader-prev" href="/nh/g/123456/1/"', rendered)
             self.assertIn('id="nh-reader-next" href="/nh/g/123456/3/"', rendered)
-            self.assertIn("document.getElementById('nh-reader-prev').href", rendered)
+            self.assertIn('src="/nh/_nh-local/assets/local.js"', rendered)
+            self.assertIn('id="nh-reader-mode"', rendered)
 
     def test_download_catalog_is_newest_first_and_paginated(self):
         with tempfile.TemporaryDirectory() as tmp:

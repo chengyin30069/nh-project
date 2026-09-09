@@ -71,7 +71,12 @@ Deno.test("actual catalog routes, scope, badges, sorting, readers and deletion",
         try {
           await page.goto(`${base}/g/${gallery}/2/`, { waitUntil: "domcontentloaded" });
           if (action === "next") await page.locator("#nh-reader-next").click();
-          if (action === "image") await page.locator('a[aria-label="Next page"] img').click();
+          if (action === "image") {
+            const img = page.locator("#nh-reader-image");
+            const box = await img.boundingBox();
+            assert(box);
+            await img.click({ position: { x: box.width * 0.75, y: box.height / 2 } });
+          }
           if (action === "keyboard") await page.keyboard.press("ArrowRight");
           await page.waitForURL(`**/nh/g/${gallery}/`, { waitUntil: "domcontentloaded", timeout: 10000 });
         } catch (error) {

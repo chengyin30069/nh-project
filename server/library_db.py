@@ -622,6 +622,45 @@ class LibraryDatabase:
                 counts[f"{taxonomy_type}/{slug}"] = int(row[0])
         return counts
 
+    def languages(self, gallery_ids: list[str]) -> dict[str, list[str]]:
+        """Fetch only language metadata for a complete catalog page in one query."""
+        if not gallery_ids:
+            return {}
+        result: dict[str, list[str]] = {}
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT gt.gallery_id,t.slug FROM gallery_taxonomies gt JOIN taxonomies t
+                ON t.id=gt.taxonomy_id AND t.type=gt.taxonomy_type
+                WHERE t.type='language' AND gt.gallery_id IN ("""
+                + ",".join("?" for _ in gallery_ids) + ") ORDER BY gt.position,t.slug",
+                gallery_ids,
+            )
+            for row in rows:
+                result.setdefault(str(row["gallery_id"]), []).append(str(row["slug"]))
+        return result
+
+    def taxonomy_directory(
+        self, taxonomy_type: str, *, query: str = "", sort: str = "count", page: int = 1, per_page: int = 100,
+    ) -> tuple[list[dict[str, object]], int]:
+        if taxonomy_type not in GALLERY_TYPES:
+            return [], 0
+        # Normalize with the same Unicode rules as catalog search, without fuzzy expansion.
+        term = normalize(query)
+        with self._connect() as db:
+            db.create_function("nh_normalize", 1, normalize, deterministic=True)
+            sql = """SELECT t.name,t.slug,count(DISTINCT gt.gallery_id) AS count
+                FROM taxonomies t JOIN gallery_taxonomies gt
+                ON t.id=gt.taxonomy_id AND t.type=gt.taxonomy_type
+                JOIN galleries g ON g.id=gt.gallery_id WHERE t.type=?
+                AND (instr(nh_normalize(t.name),?)>0 OR instr(nh_normalize(t.slug),?)>0)
+                GROUP BY t.id,t.type"""
+            params = (taxonomy_type, term, term)
+            total = int(db.execute(f"SELECT count(*) FROM ({sql})", params).fetchone()[0])
+            page = min(max(1, page), max(1, (total + per_page - 1) // per_page))
+            order = "nh_normalize(t.name),t.slug" if sort == "name" else "count DESC,nh_normalize(t.name),t.slug"
+            rows = db.execute(f"{sql} ORDER BY {order} LIMIT ? OFFSET ?", (*params, per_page, (page - 1) * per_page))
+            return [dict(row) for row in rows], total
+
     def _paged(
         self, sql: str, params: tuple[object, ...], page: int, per_page: int
     ) -> tuple[list[dict[str, object]], int]:

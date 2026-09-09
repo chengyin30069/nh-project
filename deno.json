@@ -1,6 +1,6 @@
 {
   "tasks": {
-    "e2e": "deno test -A tests/e2e/gallery_ui_test.ts tests/e2e/catalog_ui_test.ts",
+    "e2e": "deno test -A tests/e2e/gallery_ui_test.ts tests/e2e/catalog_ui_test.ts tests/e2e/presentation_ui_test.ts",
     "e2e:live": "NH_RUN_LIVE_E2E=1 deno test -A tests/e2e/live_gallery_smoke.ts"
   },
   "imports": {

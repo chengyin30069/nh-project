@@ -14,7 +14,7 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ~/nh:/home/nh/nh
+      - /home/nh:/home/nh/nh
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8765/health"]
       interval: 30s

@@ -64,6 +64,11 @@ LOCAL_API_PREFIX = "/_nh-local/api"
 LOCAL_ASSET_PREFIX = "/_nh-local/assets"
 MAX_JSON_BODY_BYTES = 64 * 1024
 LOCAL_CATALOG_PAGE_SIZE = 50
+TAXONOMY_DIRECTORIES = {
+    "tags": "tag", "artists": "artist", "characters": "character", "parodies": "parody",
+    "groups": "group", "languages": "language", "categories": "category",
+}
+LANGUAGE_FLAGS = {"chinese": "🇹🇼", "english": "🇬🇧", "japanese": "🇯🇵"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 WINDOW_GALLERY_RE = re.compile(r"window\._gallery\s*=\s*JSON\.parse\((?P<value>\"(?:\\.|[^\"\\])*\")\)")
 INTERNAL_HREF_RE = re.compile(r'(?P<prefix>\s(?:href|action)=["\'])(?P<url>/(?!/)[^"\']*)(?P<suffix>["\'])', re.IGNORECASE)
@@ -124,45 +129,6 @@ LOCAL_NAVIGATION_SCRIPT = """<script>
   }, true);
 }());
 </script>"""
-
-LOCAL_UI_CSS = r"""
-.nh-local-overlay-target{position:relative!important;isolation:isolate!important}
-.nh-local-card-controls{position:absolute!important;z-index:40!important;top:6px!important;right:6px!important;display:flex;gap:5px;align-items:center}
-.nh-local-btn,.nh-local-badge{box-sizing:border-box;min-height:25px;border:0;border-radius:5px;padding:0 8px;color:#fff!important;font:700 12px/25px system-ui,sans-serif;box-shadow:0 2px 8px #0008;text-decoration:none!important}
-.nh-local-btn{background:#ed2553!important;cursor:pointer}.nh-local-btn:hover{background:#ff4774!important}.nh-local-btn:disabled{cursor:default;opacity:.75}
-.nh-local-delete{background:#9f3030!important}.nh-local-delete:hover{background:#c43d3d!important}.nh-local-badge{background:#238847!important;pointer-events:none}
-.nh-local-detail-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0}.nh-local-detail-controls .nh-local-btn{font-size:14px;min-height:36px;line-height:36px;padding:0 14px}
-.nh-local-error{color:#ff9c9c;font:13px/1.4 system-ui,sans-serif}
-.nh-local-stale{position:sticky;top:0;z-index:2147483645;padding:7px 12px;background:#8a5a00;color:#fff;text-align:center;font:600 13px/1.3 system-ui,sans-serif}
-.nh-local-modal{position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;padding:18px;background:#000a}
-.nh-local-dialog{width:min(440px,100%);border-radius:8px;padding:18px;background:#202327;color:#f6f7f8;box-shadow:0 18px 46px #000b;font:14px/1.45 system-ui,sans-serif}
-.nh-local-dialog h2{margin:0 0 10px;font-size:18px}.nh-local-dialog p{overflow-wrap:anywhere}.nh-local-actions{display:flex;justify-content:flex-end;gap:8px}.nh-local-actions button{min-height:34px;border:0;border-radius:4px;padding:0 12px;color:#fff;font-weight:700;cursor:pointer}.nh-local-cancel{background:#555d66}.nh-local-confirm{background:#b73535}
-a[href*="/login"],a[href*="/register"],a[href*="/favorites"],a[href*="/upload"]{display:none!important}
-iframe,.advertisement,.adsbyexoclick,.ad-container{display:none!important}
-"""
-
-LOCAL_UI_JS = r"""
-(function(){
-  "use strict";
-  var API="/_nh-local/api";
-  function idFrom(value){try{return new URL(value,location.href).pathname.match(/^\/g\/(\d+)\/?$/)?.[1]||null}catch(_){return null}}
-  function clean(value){return(value||"").replace(/\s+/g," ").trim()}
-  async function request(path,options){var response=await fetch(API+path,options);var body=await response.json().catch(function(){return{}});if(!response.ok)throw new Error(body.error||("HTTP "+response.status));return body}
-  function button(label,kind){var item=document.createElement("button");item.type="button";item.className="nh-local-btn "+(kind||"");item.textContent=label;return item}
-  function titleFor(card,id){return clean(card?.querySelector(".caption")?.textContent||card?.querySelector("img")?.alt||document.querySelector("#info h1")?.textContent)||("ID "+id)}
-  function modal(id,title,onDone){var shade=document.createElement("div");shade.className="nh-local-modal";shade.innerHTML='<div class="nh-local-dialog" role="dialog" aria-modal="true"><h2>Delete downloaded gallery?</h2><p></p><div class="nh-local-error" hidden></div><div class="nh-local-actions"><button class="nh-local-cancel">Cancel</button><button class="nh-local-confirm">Delete</button></div></div>';shade.querySelector("p").textContent="ID "+id+" — "+title;var close=function(){shade.remove()};shade.querySelector(".nh-local-cancel").onclick=close;shade.onclick=function(e){if(e.target===shade)close()};shade.querySelector(".nh-local-confirm").onclick=async function(){var controls=shade.querySelectorAll("button");controls.forEach(function(x){x.disabled=true});try{await request("/galleries/"+id,{method:"DELETE"});close();onDone()}catch(error){var box=shade.querySelector(".nh-local-error");box.hidden=false;box.textContent=error.message;controls.forEach(function(x){x.disabled=false})}};document.body.appendChild(shade)}
-  async function startDownload(id,control,refresh){control.disabled=true;control.textContent="Queued";try{var job=await request("/download",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:id})});while(job.status==="queued"||job.status==="running"){control.textContent=job.status==="running"?"Running":"Queued";await new Promise(function(resolve){setTimeout(resolve,1000)});job=await request("/jobs/"+job.job_id)}if(job.status!=="succeeded")throw new Error(job.error||"Download failed");refresh()}catch(error){control.disabled=false;control.textContent="Retry";control.title=error.message}}
-  function render(target,id,status,title,detail){target.replaceChildren();if(status.downloaded){delete target.dataset.watch;var badge=document.createElement("span");badge.className="nh-local-badge";badge.textContent="Downloaded";var del=button("Delete","nh-local-delete");del.onclick=function(e){e.preventDefault();e.stopPropagation();modal(id,title,function(){render(target,id,{downloaded:false},title,detail)})};target.append(badge,del);return}var dl=button(detail?"Download":"DL");if(status.status==="queued"||status.status==="running"){dl.textContent=status.status==="running"?"Running":"Queued";dl.disabled=true;if(status.job_id&&target.dataset.watch!==status.job_id){target.dataset.watch=status.job_id;(async function(){try{var job=status;while(job.status==="queued"||job.status==="running"){await new Promise(function(resolve){setTimeout(resolve,1000)});job=await request("/jobs/"+status.job_id);dl.textContent=job.status==="running"?"Running":"Queued"}render(target,id,{downloaded:job.status==="succeeded",status:job.status,error:job.error},title,detail)}catch(error){dl.disabled=false;dl.textContent="Retry";dl.title=error.message}})()}}else if(status.status==="failed"){dl.textContent="Retry";dl.title=status.error||"Download failed"}dl.onclick=function(e){e.preventDefault();e.stopPropagation();startDownload(id,dl,function(){render(target,id,{downloaded:true},title,detail)})};target.appendChild(dl)}
-  async function boot(){
-    document.querySelectorAll("iframe,.advertisement,.adsbyexoclick,.ad-container").forEach(function(x){x.remove()});
-    var cards=new Map();document.querySelectorAll('a[href*="/g/"]').forEach(function(link){var id=idFrom(link.href);if(!id||cards.has(id))return;var card=link.closest(".gallery")||link.closest(".thumb-container");if(!card)return;var cover=link.querySelector("img")?link:card;cover.classList.add("nh-local-overlay-target");var holder=document.createElement("span");holder.className="nh-local-card-controls";cover.appendChild(holder);cards.set(id,{holder:holder,title:titleFor(card,id)})});
-    var detailId=location.pathname.match(/^\/g\/(\d+)\/?$/)?.[1];var detail=null;if(detailId){detail=document.createElement("div");detail.className="nh-local-detail-controls";var anchor=document.querySelector("#info")||document.querySelector("main")||document.body;anchor.appendChild(detail)}
-    var ids=Array.from(cards.keys());if(detailId&&!ids.includes(detailId))ids.push(detailId);if(!ids.length)return;
-    try{var result=await request("/galleries/status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:ids})});cards.forEach(function(value,id){render(value.holder,id,result.galleries[id]||{},value.title,false)});if(detail)render(detail,detailId,result.galleries[detailId]||{},titleFor(null,detailId),true)}catch(error){if(detail){detail.textContent="Local status unavailable: "+error.message;detail.classList.add("nh-local-error")}}
-  }
-  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",boot);else boot();
-}());
-"""
 
 
 def is_valid_gallery_id(value: object) -> bool:
@@ -1081,6 +1047,46 @@ class LocalLibrary:
             base_path=f"/downloads/{taxonomy_type}/{quote(slug)}/?sort={sort}", sort=sort,
         )
 
+    def taxonomy_directory_html(self, directory: str, query: str, page: int, sort: str) -> str:
+        self._index_for_synchronous_use()
+        kind = TAXONOMY_DIRECTORIES[directory]
+        sort = sort if sort in {"count", "name"} else "count"
+        records, total = self.database.taxonomy_directory(kind, query=query, sort=sort, page=page)
+        page_count = max(1, (total + 99) // 100)
+        page = min(max(1, page), page_count)
+        route = f"/downloads/{directory}/"
+        def page_url(number: int) -> str:
+            return html.escape(f"{route}?q={quote(query)}&sort={sort}&page={number}")
+        entries = "".join(
+            f'<a class="nh-taxonomy-link" href="/downloads/{kind}/{quote(str(record["slug"]), safe="")}/">'
+            f'<span>{html.escape(str(record["name"]))}</span>'
+            f'<span class="nh-taxonomy-count" title="{record["count"]} local galleries">{record["count"]:,}</span></a>'
+            for record in records
+        ) or '<p class="nh-catalog-empty">No downloaded classifications found.</p>'
+        pagination = (f'<a href="{page_url(page - 1)}">Prev</a>' if page > 1 else "")
+        pagination += f'<span>Page {page} / {page_count}</span>'
+        if page < page_count:
+            pagination += f'<a href="{page_url(page + 1)}">Next</a>'
+        options = "".join(
+            f'<option value="{value}"' + (' selected' if sort == value else '') + f'>{label}</option>'
+            for value, label in (("count", "Count ↓"), ("name", "Name A–Z"))
+        )
+        return (
+            '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>Downloaded {directory.title()}</title><link rel="stylesheet" href="/_nh-local/assets/local.css">'
+            '<script defer src="/_nh-local/assets/local.js"></script></head><body class="nh-catalog-body">'
+            f'{self._local_menu_html()}{self._catalog_site_header_html()}'
+            f'<main class="nh-catalog-page"><section class="nh-catalog-panel"><h1>Downloaded {directory.title()}</h1>'
+            f'<p class="nh-directory-summary">{total:,} classifications in your downloaded library</p>'
+            f'<form class="nh-directory-filter" action="{route}" method="get">'
+            f'<label>Find a classification<input type="search" name="q" value="{html.escape(query, quote=True)}" placeholder="Name or slug"></label>'
+            f'<label>Sort<select name="sort">{options}</select></label><button type="submit">Search</button></form>'
+            f'<div class="nh-taxonomy-directory">{entries}</div><nav class="nh-catalog-pagination" aria-label="Pagination">{pagination}'
+            f'<form class="nh-page-jump" action="{route}" method="get"><input type="hidden" name="q" value="{html.escape(query, quote=True)}">'
+            f'<input type="hidden" name="sort" value="{sort}"><label>Page <input type="number" name="page" min="1" max="{page_count}" value="{page}" aria-label="Page number"></label>'
+            '<button type="submit">Go</button></form></nav></section></main></body></html>'
+        )
+
     def preview_media_path(self, gallery_id: str, page: str) -> Path | None:
         if self.manager.archive_path(gallery_id).exists():
             return self.page_image_path(gallery_id, page)
@@ -1545,12 +1551,18 @@ class LocalLibrary:
         sort: str | None = None,
     ) -> str:
         cards = []
+        languages = self.database.languages([str(record["id"]) for record in records])
         for record in records:
             gallery_id = html.escape(str(record["id"]))
             gallery_title = html.escape(str(record["title"]))
             search_titles = html.escape("\n".join(str(record.get(key) or "") for key in ("title_english", "title_japanese", "title_pretty")), quote=True)
             cover_url = html.escape(str(record.get("cover_url") or ""))
             local_thumbnail = f"/catalog-thumbnail/{gallery_id}"
+            flags = " ".join(dict.fromkeys(
+                LANGUAGE_FLAGS[language] for language in languages.get(str(record["id"]), [])
+                if language in LANGUAGE_FLAGS
+            ))
+            prefix = f'<span class="nh-language-flags">{flags}</span> ' if flags else ""
             image = (
                 f'<img loading="lazy" src="{cover_url}" alt="{gallery_title}" '
                 f'data-nh-fallback-src="{local_thumbnail}" '
@@ -1560,7 +1572,7 @@ class LocalLibrary:
             )
             cards.append(
                 f'<div class="gallery" data-nh-titles="{search_titles}"><a class="cover" href="/g/{gallery_id}/">{image}'
-                f'<div class="caption">{gallery_title}</div></a></div>'
+                f'<div class="caption">{prefix}{gallery_title}</div></a></div>'
             )
         if not cards:
             cards.append('<p class="nh-catalog-empty">No downloaded galleries found.</p>')
@@ -1607,16 +1619,17 @@ class LocalLibrary:
         )
 
     def _catalog_site_header_html(self, query: str = "") -> str:
+        taxonomy_links = "".join(
+            f'<a href="/downloads/{directory}/">{directory.title()}</a>' for directory in TAXONOMY_DIRECTORIES
+        )
         return (
             '<header class="nh-catalog-site-header"><a class="nh-catalog-logo" href="/" aria-label="Home">'
             '<img src="/logo.svg" alt="nhentai"></a>'
             '<form class="nh-catalog-search" action="/downloads/search/" method="get">'
             f'<input type="search" name="q" value="{html.escape(query)}" aria-label="Search local downloads" autocomplete="off">'
             '<button type="submit" aria-label="Search">⌕</button></form>'
-            '<nav class="nh-catalog-primary-nav"><a href="/random/">Random</a><a href="/tags/">Tags</a>'
-            '<a href="/artists/">Artists</a><a href="/characters/">Characters</a>'
-            '<a href="/parodies/">Parodies</a><a href="/groups/">Groups</a>'
-            '<a href="/community/taxonomy/">Community</a></nav></header>'
+            '<nav class="nh-catalog-primary-nav" aria-label="Downloaded classifications"><a href="/random/">Random</a>'
+            f'{taxonomy_links}<a href="/community/taxonomy/">Community</a></nav></header>'
         )
 
     def _gallery_images(self, gallery_id: str) -> list[Path]:
@@ -1732,28 +1745,34 @@ class LocalLibrary:
         title = f"Gallery {gallery_id} - page {page_number}"
         next_page = min(page_number + 1, page_count or page_number + 1)
         prev_page = max(page_number - 1, 1)
+        prev_href = f"/g/{gallery_id}/" if page_number <= 1 else f"/g/{gallery_id}/{prev_page}/"
+        jump_disabled = " disabled" if page_count < 1 else ""
         next_href = (
             f"/g/{gallery_id}/"
             if page_count > 0 and page_number >= page_count
             else f"/g/{gallery_id}/{next_page}/"
         )
-        image = f'<img src="{html.escape(image_src)}" alt="{html.escape(title)}">' if image_src else "<p>Page image unavailable.</p>"
+        image = f'<img id="nh-reader-image" src="{html.escape(image_src)}" alt="{html.escape(title)}">' if image_src else "<p>Page image unavailable.</p>"
         preload = f'<link rel="preload" as="image" href="{html.escape(next_image_src)}">' if next_image_src else ""
         preview_label = '<span class="nh-preview-label">Temporary preview</span>' if preview else ""
         return (
             "<!doctype html><html><head>"
-            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>{preload}'
-            "<style>body{margin:0;background:#111;color:#eee;text-align:center;font-family:sans-serif}"
-            "nav{position:sticky;top:0;z-index:2;padding:12px;background:#111e}a{color:#8cc8ff;margin:0 12px}"
-            "img{display:block;max-width:100%;height:auto;margin:auto}.nh-preview-label{color:#f5b942;margin-left:12px}</style>"
-            "</head><body>"
-            f"{self._local_menu_html()}<nav><a href=\"/g/{gallery_id}/\">Gallery</a><a id=\"nh-reader-prev\" href=\"/g/{gallery_id}/{prev_page}/\">Prev</a>"
-            f"<span>{page_number} / {page_count}</span>{preview_label}<a id=\"nh-reader-next\" href=\"{next_href}\">Next</a></nav>"
-            f'<a href="{next_href}" aria-label="Next page">{image}</a>'
-            "<script>document.addEventListener('keydown',function(e){"
-            "if(e.key==='ArrowLeft')location.href=document.getElementById('nh-reader-prev').href;"
-            "if(e.key==='ArrowRight')location.href=document.getElementById('nh-reader-next').href;"
-            "});</script></body></html>"
+            f'<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>{preload}'
+            '<link rel="stylesheet" href="/_nh-local/assets/local.css"><script defer src="/_nh-local/assets/local.js"></script>'
+            '</head><body class="nh-reader" data-reader-mode="fit">'
+            f'<nav class="nh-reader-toolbar" aria-label="Reader controls"><a class="nh-reader-back" href="/g/{gallery_id}/">← Gallery</a>'
+            f'<div class="nh-reader-pagination"><a id="nh-reader-prev" href="{prev_href}" aria-label="Previous page">← Prev</a>'
+            f'<span class="nh-reader-progress">{page_number} <span>/ {page_count}</span></span>'
+            f'<form class="nh-reader-jump" action="/g/{gallery_id}/" method="get">'
+            f'<input type="number" name="page" min="1" max="{max(1, page_count)}" step="1" value="{page_number}" '
+            f'inputmode="numeric" aria-label="Jump to page" required{jump_disabled}>'
+            f'<button type="submit"{jump_disabled}>Go</button></form>'
+            f'<a id="nh-reader-next" href="{next_href}" aria-label="Next page">Next →</a></div>'
+            '<label class="nh-reader-size">Size<select id="nh-reader-mode" aria-label="Reading size">'
+            '<option value="fit">Fit page</option><option value="original">Original size</option></select></label>'
+            f'{preview_label}</nav><main class="nh-reader-stage" aria-label="Page image">'
+            f'<a class="nh-reader-image-link" href="{next_href}" aria-label="Next page" title="Click the left half for the previous page; right half for the next page">{image}</a>'
+            '</main></body></html>'
         )
 
     def _preview_unavailable_html(self, gallery_id: str, error: str) -> str:
@@ -1999,6 +2018,19 @@ def make_library_handler(
                     page = 1
                 self._send_html(
                     library.local_search_html(params.get("q", [""])[0], page, params.get("sort", ["id"])[0]),
+                    extra_headers={"Cache-Control": "no-cache"},
+                )
+                return
+
+            directory = path.removeprefix("/downloads/").rstrip("/")
+            if path.startswith("/downloads/") and directory in TAXONOMY_DIRECTORIES:
+                params = parse_qs(parsed.query)
+                try:
+                    page = max(1, int(params.get("page", ["1"])[0]))
+                except ValueError:
+                    page = 1
+                self._send_html(
+                    library.taxonomy_directory_html(directory, params.get("q", [""])[0], page, params.get("sort", ["count"])[0]),
                     extra_headers={"Cache-Control": "no-cache"},
                 )
                 return
