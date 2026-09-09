@@ -36,6 +36,7 @@ flowchart TD
 | `server/search.py` | NFKC 正規化、分詞、別名展開、有界拼字距離 |
 | `server/config.py` | YAML 結構驗證、設定來源與環境變數映射 |
 | `server/static/local-ui.js` / `.css` | 本機與代理頁面的操作、下載控制、分類切換、書單與詳情樣式 |
+| `logo.png` | 網站共用品牌 PNG；用於頁首、favicon、Apple touch icon 與舊 logo URL 相容回應 |
 | `nh2_requireCfToken.sh` | 現行下載器，接受書籍 ID、Cookie、User-Agent、重試／並行參數 |
 | `firefox-extension/` | 原站操作按鈕、刪除對話框與下載佇列面板 |
 | `tests/` | Python 單元／HTTP 整合測試；`e2e/` 使用 Deno 與 Playwright |
@@ -51,6 +52,8 @@ flowchart TD
 ### 遠端瀏覽
 
 - 代理首頁、搜尋、七種分類及分類目錄、詳情、隨機、資訊與部分社群公開頁面。
+- 代理頁面的 nhentai logo 與既有 favicon 會換成 repo 根目錄 `logo.png`；即使上游 SvelteKit 重新建立 DOM，MutationObserver 也會再次套用。舊 `/logo.svg`、`/favicon.png`、`/favicon.ico` 路徑直接回傳相同 PNG。
+- 本機與代理介面採由 logo 取樣的主色 `#008edb`、hover `#22adf5`、深藍頁面 `#041019`、表面 `#081b28` 與白色系文字；刪除與錯誤控制保留紅色語意。
 - 上游 canonical redirect 改成本機路徑；內部連結和 GET 表單保持在本機服務，支援 `/nh` 等 URL 前綴。
 - 注入本機導覽、下載／刪除控制、Decensored 標示，以及搜尋與分類結果的 Show all / Show downloaded 切換。
 - 移除廣告 iframe、已知廣告／追蹤 script、帳號及部分需要登入的操作；不提供收藏、投票、留言寫入或上傳。
@@ -218,9 +221,9 @@ YAML 分為 `auth`、`server`、`paths`、`download`、`cache`，拒絕未知區
 
 預設 API／library 埠為 8765／8766；程式預設 allowed networks 包含 localhost、192.168.50.0/24、172.17.0.0/16、100.64.0.0/10，實際可被 YAML／環境／CLI 覆寫。只有 trusted proxy socket peer 可提供 `X-Forwarded-For`，由右往左剝除可信 hop 後驗證來源。8765 拒絕一般瀏覽器 Origin，允許無 Origin 客戶端與 `moz-extension://`；8766 前端使用同源 API。
 
-`server.Dockerfile` 使用 Alpine 3.23 與 Python，安裝下載依賴，只複製 server 與現行下載器。Compose 掛入唯讀設定及 storage，指定 UID/GID、重啟策略與 healthcheck。原始 `Dockerfile` 是另一路下載器 image，不等同 server image。systemd 範例有固定帳號與工作路徑，部署時需配合環境。
+`server.Dockerfile` 使用 Alpine 3.23 與 Python，安裝下載依賴，並複製 server、現行下載器及 repo 根目錄 `logo.png`。Compose 掛入唯讀設定及 storage，指定 UID/GID、重啟策略與 healthcheck。更換 logo 後必須重建 server image。原始 `Dockerfile` 是另一路下載器 image，不等同 server image。systemd 範例有固定帳號與工作路徑，部署時需配合環境。
 
-`deploy/` 提供 nginx 與 Copyparty 範例；它被 gitignore 排除，是本機部署參考，不是已追蹤的 server 原始碼。nginx `/nh/` 保留前綴轉發，server 必須設定對應 base path。實際 compose 掛載應以現場檔案為準，不把 README 的示例視為現行部署事實。
+`deploy/` 提供 nginx 與 Copyparty 範例；它被 gitignore 排除，是本機部署參考，不是已追蹤的 server 原始碼。nginx `/nh/` 保留前綴轉發，server 必須設定對應 base path。現場 `/etc/nginx/html/index.html` 已改成相同品牌配色，並以 `/etc/nginx/html/logo.png` 同時顯示頁面 logo 與 favicon；此二檔不在 Git worktree，替換 repo logo 時需另行同步。實際 compose 掛載應以現場檔案為準。
 
 ```bash
 python3 server/nh_server.py --config config.yaml
@@ -269,8 +272,16 @@ Python 測試使用暫存資料夾與合成 archive，涵蓋配置、下載、HT
 6. 新增 Python 分類／語言／HTTP 測試和瀏覽器版面／reader 測試，修正既有純 HTML 測試誤啟動背景索引器而造成暫存目錄清理競態。
 7. 後續調整：卡片標題移除新增的字體覆寫，恢復上游／本機原先各自的字體，保留完整等高排版；reader 增加圖片左右半邊翻頁、首頁返回詳情及頁數右側的數字跳頁框。
 
-Firefox 外掛、現場 compose 修改與正式服務保持原狀；沒有修改 CBZ 或正式資料庫，也尚未部署／重啟正式服務。介面語言沿用專案現有英文，本文使用繁體中文。
+### 2026-09-10 品牌更新
 
-最終驗證（2026-09-09）：`python3 -m unittest discover -s tests -q` 共 **73 個測試通過**；`deno task e2e` 共 **3 組瀏覽器整合測試通過**；`git diff --check` 通過。已檢視桌面與手機截圖，確認中文旗子、完整標題、分類導覽及 reader 工具列。正式部署的 live smoke 未執行。
+1. 新增 repo 根目錄 `logo.png` 為單一品牌來源，替換本機與代理頁首圖示、分頁 favicon 與 Apple touch icon，並讓舊圖示 URL 回傳同一 PNG。
+2. 依 logo 重做網站的藍、白、深藍配色；Delete 與錯誤狀態仍使用紅色。
+3. Docker server image 納入 `logo.png`。
+4. 寫入現場 `/etc/nginx/html/index.html` 與 `/etc/nginx/html/logo.png`，首頁保留 Copyparty、NH Server、Monitor 三個入口並套用同一品牌。
+5. 增加 HTTP 與 Playwright 驗證，涵蓋 base path 下的品牌資源、舊 URL 相容、favicon、DOM hydration 後的 logo 與主背景色。
+
+Firefox 外掛與現場 compose 保持原狀；沒有修改 CBZ 或正式資料庫。靜態 nginx 首頁檔案不需 reload 即可生效；本次已執行 `docker compose up -d --build nh-server` 重建並重建置正式容器。介面語言沿用專案現有英文，本文使用繁體中文。
+
+最終驗證（2026-09-10）：`python3 -m unittest discover -s tests -q` 共 **73 個測試通過**；`deno task e2e` 共 **3 組瀏覽器整合測試通過**；`git diff --check` 與 `sudo nginx -t` 通過。已檢視桌面／手機書單、分類總覽、reader 及 nginx 首頁截圖。重建後容器為 healthy，並從正式 nginx 與容器內的 `/nh/logo.png`、舊 `/nh/logo.svg` 和 `/nh/downloads/` 完成 smoke check；兩條圖示 URL 的內容雜湊均與 repo `logo.png` 相同。
 
 可設定 `NH_E2E_ARTIFACT_DIR` 讓 presentation E2E 輸出桌面／手機書單、分類總覽與 reader 截圖；圖像內容皆為合成測試圖片。測試環境缺少中日文／emoji 字型時，DOM 與幾何測試仍可執行，但視覺檢查需提供相應字型。本次僅在 `/tmp/nh-project-review/` 放置測試字型與 fontconfig，沒有變更專案的字型依賴或系統字型設定。

@@ -40,6 +40,7 @@ except ModuleNotFoundError:  # Direct execution: python3 server/nh_server.py
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_UI_CSS_PATH = PROJECT_ROOT / "server" / "static" / "local-ui.css"
 LOCAL_UI_JS_PATH = PROJECT_ROOT / "server" / "static" / "local-ui.js"
+BRAND_LOGO_PATH = PROJECT_ROOT / "logo.png"
 DEFAULT_ALLOWED_NETWORKS = (
     "192.168.50.0/24",
     "127.0.0.1/32",
@@ -69,6 +70,11 @@ TAXONOMY_DIRECTORIES = {
     "groups": "group", "languages": "language", "categories": "category",
 }
 LANGUAGE_FLAGS = {"chinese": "🇹🇼", "english": "🇬🇧", "japanese": "🇯🇵"}
+BRAND_HEAD_HTML = (
+    '<link rel="icon" type="image/png" href="/logo.png">'
+    '<link rel="apple-touch-icon" href="/logo.png">'
+    '<meta name="theme-color" content="#008edb">'
+)
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 WINDOW_GALLERY_RE = re.compile(r"window\._gallery\s*=\s*JSON\.parse\((?P<value>\"(?:\\.|[^\"\\])*\")\)")
 INTERNAL_HREF_RE = re.compile(r'(?P<prefix>\s(?:href|action)=["\'])(?P<url>/(?!/)[^"\']*)(?P<suffix>["\'])', re.IGNORECASE)
@@ -956,7 +962,7 @@ class LocalLibrary:
         secondary_title = html.escape(str(record.get("secondary_title") or ""))
         subtitle = f'<h2>{secondary_title}</h2>' if secondary_title and secondary_title != title else ""
         return (
-            '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{BRAND_HEAD_HTML}'
             f'<title>{title}</title><link rel="stylesheet" href="/_nh-local/assets/local.css">'
             '<script defer src="/_nh-local/assets/local.js"></script></head><body class="nh-catalog-body" data-nh-downloaded-gallery="true">'
             f'{self._local_menu_html()}{self._catalog_site_header_html()}'
@@ -1072,7 +1078,7 @@ class LocalLibrary:
             for value, label in (("count", "Count ↓"), ("name", "Name A–Z"))
         )
         return (
-            '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{BRAND_HEAD_HTML}'
             f'<title>Downloaded {directory.title()}</title><link rel="stylesheet" href="/_nh-local/assets/local.css">'
             '<script defer src="/_nh-local/assets/local.js"></script></head><body class="nh-catalog-body">'
             f'{self._local_menu_html()}{self._catalog_site_header_html()}'
@@ -1207,6 +1213,12 @@ class LocalLibrary:
         return images[0] if images else None
 
     def rewrite_html(self, source: str, *, stale: bool = False) -> str:
+        source = re.sub(
+            r"<link\b[^>]*\brel=[\"'][^\"']*\b(?:icon|shortcut icon|apple-touch-icon)\b[^\"']*[\"'][^>]*>",
+            "",
+            source,
+            flags=re.IGNORECASE,
+        )
         source = re.sub(r"<meta\b[^>]*(?:delegate-ch|tsyndicate|exoclick)[^>]*>", "", source, flags=re.IGNORECASE)
         source = re.sub(
             r"<script\b[^>]*\bsrc=[\"'][^\"']*(?:cloudflareinsights|tsyndicate|exoclick|popads)[^\"']*[\"'][^>]*>\s*</script>",
@@ -1227,6 +1239,18 @@ class LocalLibrary:
             source,
             flags=re.IGNORECASE | re.DOTALL,
         )
+        source = re.sub(
+            r"(?P<prefix>\bsrc=[\"'])(?:https?:)?//(?:www\.)?nhentai\.net/logo\.svg(?P<suffix>[\"'])",
+            r"\g<prefix>/logo.png\g<suffix>",
+            source,
+            flags=re.IGNORECASE,
+        )
+        source = re.sub(
+            r"(?P<prefix>\bsrc=[\"'])(?:\./|/)?logo\.svg(?P<suffix>[\"'])",
+            r"\g<prefix>/logo.png\g<suffix>",
+            source,
+            flags=re.IGNORECASE,
+        )
         rewritten = ABS_NHENTAI_HREF_RE.sub(r"\g<prefix>\g<url>\g<suffix>", source)
         rewritten = INTERNAL_HREF_RE.sub(lambda match: f"{match.group('prefix')}{match.group('url')}{match.group('suffix')}", rewritten)
         rewritten = re.sub(r'(?P<quote>["\'])(?:(?:\.\./)|(?:\./))+_app/', r'\g<quote>/_app/', rewritten)
@@ -1241,7 +1265,8 @@ class LocalLibrary:
         if "data-nh-local-navigation" in source:
             return source
         assets = (
-            '<link data-nh-local-navigation="true" rel="stylesheet" href="/_nh-local/assets/local.css">'
+            BRAND_HEAD_HTML
+            + '<link data-nh-local-navigation="true" rel="stylesheet" href="/_nh-local/assets/local.css">'
             + LOCAL_NAVIGATION_SCRIPT.replace("<script>", '<script data-nh-local-navigation="true">', 1)
             + '<script defer src="/_nh-local/assets/local.js"></script>'
         )
@@ -1609,7 +1634,7 @@ class LocalLibrary:
             )
             pagination = f'<nav class="nh-catalog-pagination">{"".join(links)}</nav>'
         return (
-            "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            f"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{BRAND_HEAD_HTML}"
             f"<title>{html.escape(title)}</title>"
             '<link rel="stylesheet" href="/_nh-local/assets/local.css"><script defer src="/_nh-local/assets/local.js"></script>'
             "</head><body class=\"nh-catalog-body\">"
@@ -1624,7 +1649,7 @@ class LocalLibrary:
         )
         return (
             '<header class="nh-catalog-site-header"><a class="nh-catalog-logo" href="/" aria-label="Home">'
-            '<img src="/logo.svg" alt="nhentai"></a>'
+            '<img src="/logo.png" alt="Local gallery"></a>'
             '<form class="nh-catalog-search" action="/downloads/search/" method="get">'
             f'<input type="search" name="q" value="{html.escape(query)}" aria-label="Search local downloads" autocomplete="off">'
             '<button type="submit" aria-label="Search">⌕</button></form>'
@@ -1697,13 +1722,14 @@ class LocalLibrary:
         images = self._gallery_images(gallery_id)
         cover = f'<img src="/media/{gallery_id}/{quote(images[0].name)}" alt="{html.escape(title)}">' if images else ""
         return (
-            "<!doctype html><html><head>"
+            f"<!doctype html><html><head>{BRAND_HEAD_HTML}"
             f"<title>{html.escape(title)}</title>"
-            "<style>body{background:#111;color:#eee;font-family:sans-serif;max-width:1000px;margin:auto;padding:24px}"
-            "a{color:#ff4774}img{max-width:320px;height:auto}</style></head><body>"
+            '<link rel="stylesheet" href="/_nh-local/assets/local.css"></head><body class="nh-catalog-body">'
+            f"{self._local_menu_html()}{self._catalog_site_header_html()}"
+            '<main class="nh-local-gallery-panel">'
             f"<h1>{html.escape(title)}</h1>"
             f"{cover}<p>Local archive: {html.escape(self.manager.archive_path(gallery_id).name)} · {len(images)} pages</p>"
-            f"<p><a href=\"/g/{gallery_id}/1/\">Open reader</a></p>"
+            f'<p><a class="nh-local-reader-button" href="/g/{gallery_id}/1/">Open reader</a></p></main>'
             "</body></html>"
         )
 
@@ -1777,8 +1803,10 @@ class LocalLibrary:
 
     def _preview_unavailable_html(self, gallery_id: str, error: str) -> str:
         return (
-            "<!doctype html><html><head><meta charset=\"utf-8\"><title>Preview unavailable</title></head><body>"
-            f"{self._local_menu_html()}<main><h1>Preview unavailable</h1><p>{html.escape(error)}</p>"
+            f"<!doctype html><html><head><meta charset=\"utf-8\">{BRAND_HEAD_HTML}<title>Preview unavailable</title>"
+            '<link rel="stylesheet" href="/_nh-local/assets/local.css"></head><body class="nh-catalog-body">'
+            f"{self._local_menu_html()}{self._catalog_site_header_html()}<main class=\"nh-local-gallery-panel\">"
+            f"<h1>Preview unavailable</h1><p>{html.escape(error)}</p>"
             f'<p><a href="/g/{gallery_id}/">Back to gallery</a></p></main></body></html>'
         )
 
@@ -1967,6 +1995,9 @@ def make_library_handler(
                 self._send_redirect(path.removeprefix("/downloads").rstrip("/") + "/" + query, no_store=True)
                 return
 
+            if path in {"/logo.png", "/logo.svg", "/favicon.png", "/favicon.ico"}:
+                self._send_file(BRAND_LOGO_PATH, cache_control="public, max-age=3600")
+                return
             if path == f"{LOCAL_ASSET_PREFIX}/local.css":
                 self._send_file(LOCAL_UI_CSS_PATH)
                 return

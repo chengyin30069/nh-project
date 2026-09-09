@@ -69,6 +69,16 @@ Deno.test("language flags, equal rows, local directories and persistent reader s
 
     await page.goto(`${base}/search/?q=layout`);
     await page.waitForTimeout(2700); // Includes a late upstream DOM replacement, after normal retry timers.
+    assertEquals(await page.locator('link[rel~="icon"]').getAttribute("href"), "/nh/logo.png");
+    assertEquals(await page.locator("a.logo img").getAttribute("src"), "/nh/logo.png");
+    const logoResponse = await page.request.get(`${base}/logo.svg`);
+    assertEquals(logoResponse.status(), 200);
+    assertEquals(logoResponse.headers()["content-type"], "image/png");
+    assert((await logoResponse.body()).length > 1_000_000);
+    assertEquals(
+      await page.locator("body").evaluate((el) => getComputedStyle(el).backgroundColor),
+      "rgb(4, 16, 25)",
+    );
     await assertRows(page, 5);
     assertEquals(await page.locator(".caption").first().evaluate((el) => getComputedStyle(el).fontFamily), 'Georgia, serif');
     assertEquals(await page.locator(".nh-delete-button").count(), 2); // Same book appears twice.
@@ -85,6 +95,7 @@ Deno.test("language flags, equal rows, local directories and persistent reader s
     await screenshot("catalog-mobile");
 
     await page.goto(`${base}/downloads/`);
+    assertEquals(await page.locator(".nh-catalog-logo img").getAttribute("src"), "/nh/logo.png");
     assertEquals(await page.locator(".caption").first().evaluate((el) => getComputedStyle(el).fontWeight), "700");
     assertEquals(await page.locator(".nh-language-flags").allTextContents(), ["🇹🇼 🇬🇧", "🇹🇼 🇬🇧"]);
     await page.getByRole("navigation", { name: "Downloaded classifications" }).getByRole("link", { name: "Artists", exact: true }).click();

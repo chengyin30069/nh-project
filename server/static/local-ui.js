@@ -534,6 +534,17 @@
     }
   }
 
+  function setupBranding() {
+    const logoPath = `${BASE_PATH}/logo.png`;
+    for (const logo of document.querySelectorAll('a.logo img, .nh-catalog-logo img, img[src$="/logo.svg"]')) {
+      if (logo.getAttribute("src") !== logoPath) logo.setAttribute("src", logoPath);
+      logo.setAttribute("alt", "Local gallery");
+    }
+    for (const link of document.querySelectorAll('link[rel~="icon"], link[rel="apple-touch-icon"]')) {
+      if (link.getAttribute("href") !== logoPath) link.setAttribute("href", logoPath);
+    }
+  }
+
   function setupReader() {
     const select = document.getElementById("nh-reader-mode");
     const image = document.getElementById("nh-reader-image");
@@ -612,11 +623,19 @@
     presentationPending = true;
     requestAnimationFrame(() => {
       presentationPending = false;
+      setupBranding();
       setupCardPresentation();
     });
-  }).observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
+  }).observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["class", "src"],
+  });
   document.querySelector(".nh-directory-filter select")?.addEventListener("change", (event) => event.target.form.requestSubmit());
 
+  setupBranding();
   detectUrlChange();
   window.setInterval(detectUrlChange, URL_CHECK_INTERVAL_MS);
   window.addEventListener("pageshow", () => { currentUrl = ""; detectUrlChange(); });

@@ -17,6 +17,22 @@ handoff notes are maintained in [`project.md`](project.md).
 YAML configuration, Docker server deployment, and SQLite-only library restoration
 are documented in [`doc/docker_server.md`](doc/docker_server.md).
 
+## Branding
+
+The library server uses the repository-root `logo.png` for its visible header
+logo, browser favicon, Apple touch icon, and legacy `/logo.svg`,
+`/favicon.png`, and `/favicon.ico` requests. The local and proxied interfaces
+use a cyan-blue, white, and deep-navy palette sampled from that image. The server
+Docker image copies the same file, so rebuild the image after replacing it.
+
+The host landing page at `/etc/nginx/html/index.html` uses
+`/etc/nginx/html/logo.png` for both its visible logo and favicon. When changing
+the brand image, update the repository copy and install it into the nginx root:
+
+```bash
+sudo install -o root -g root -m 0644 logo.png /etc/nginx/html/logo.png
+```
+
 # Dependencies
 * aria2
 * wget

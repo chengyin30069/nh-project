@@ -972,6 +972,9 @@ class LocalLibraryTests(unittest.TestCase):
                 outside, _ = request("GET", "/")
                 home, home_body = request("GET", "/nh/")
                 asset, asset_body = request("GET", "/nh/_nh-local/assets/local.js")
+                brand_logo, brand_logo_body = request("GET", "/nh/logo.png")
+                legacy_logo, legacy_logo_body = request("GET", "/nh/logo.svg")
+                legacy_favicon, legacy_favicon_body = request("GET", "/nh/favicon.ico")
                 api_payload = json.dumps({"ids": ["123456"]}).encode()
                 api, _ = request(
                     "POST",
@@ -989,9 +992,21 @@ class LocalLibraryTests(unittest.TestCase):
             self.assertEqual(outside.status, 404)
             self.assertEqual(home.status, 200)
             self.assertIn('href="/nh/g/123456/"', rendered)
-            self.assertIn('src="/nh/logo.svg"', rendered)
+            self.assertIn('src="/nh/logo.png"', rendered)
+            self.assertIn('rel="icon" type="image/png" href="/nh/logo.png"', rendered)
+            self.assertNotIn("favicon.png", rendered)
             self.assertEqual(asset.status, 200)
             self.assertIn(b"BASE_PATH", asset_body)
+            expected_logo = (Path(__file__).resolve().parents[1] / "logo.png").read_bytes()
+            for response, body in (
+                (brand_logo, brand_logo_body),
+                (legacy_logo, legacy_logo_body),
+                (legacy_favicon, legacy_favicon_body),
+            ):
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Content-Type"), "image/png")
+                self.assertEqual(response.getheader("Cache-Control"), "public, max-age=3600")
+                self.assertEqual(body, expected_logo)
             self.assertEqual(api.status, 200)
             self.assertEqual(redirect.status, 302)
             self.assertEqual(redirect.getheader("Location"), "/nh/search?q=test")

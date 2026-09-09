@@ -18,7 +18,7 @@ function fixtureHtml(pathname: string): string {
         <div class="gallery"><a class="cover" href="/g/123456/"><img alt="Downloaded fixture"><div class="caption">Downloaded fixture</div></a></div>
         <div class="gallery"><a class="cover" href="/g/654321/"><img alt="Remote fixture [Uncensored]"><div class="caption">Remote fixture [Uncensored]</div></a></div>
       </div>`;
-  return `<!doctype html><html><head><link rel="stylesheet" href="/_nh-local/assets/local.css">
+  return `<!doctype html><html><head><link rel="icon" href="/favicon.png"><link rel="stylesheet" href="/_nh-local/assets/local.css">
     <script>document.addEventListener("click", (event) => {
       const interactive = event.target?.closest?.("button, input, select, textarea, [role='button'], #nh-delete-modal");
       if (interactive) return;
@@ -28,7 +28,7 @@ function fixtureHtml(pathname: string): string {
       event.stopImmediatePropagation();
       window.location.assign(anchor.href);
     }, true);</script><script defer src="/_nh-local/assets/local.js"></script></head>
-    <body ${detail && pathname.includes("123456") ? 'data-nh-downloaded-gallery="true"' : ""}>${content}<script>setTimeout(() => { document.querySelector("${detail ? "#info" : "main"}").innerHTML = ${JSON.stringify(hydrated)}; }, 120);</script></body></html>`;
+    <body ${detail && pathname.includes("123456") ? 'data-nh-downloaded-gallery="true"' : ""}><a class="logo"><img src="/logo.svg" alt="nhentai"></a>${content}<script>setTimeout(() => { document.querySelector("${detail ? "#info" : "main"}").innerHTML = ${JSON.stringify(hydrated)}; }, 120);</script></body></html>`;
 }
 
 Deno.test("controls survive hydration and match extension behavior", async () => {
@@ -41,6 +41,11 @@ Deno.test("controls survive hydration and match extension behavior", async () =>
     }
     if (url.pathname === "/_nh-local/assets/local.css") {
       return new Response(uiStyle, { headers: { "Content-Type": "text/css" } });
+    }
+    if (url.pathname === "/logo.png") {
+      return new Response(await Deno.readFile(new URL("../../logo.png", import.meta.url)), {
+        headers: { "Content-Type": "image/png" },
+      });
     }
     if (url.pathname === "/_nh-local/api/galleries/status") {
       const body = await request.json();
@@ -69,6 +74,10 @@ Deno.test("controls survive hydration and match extension behavior", async () =>
     await page.goto(`http://127.0.0.1:${port}/search?q=fixture`);
     await page.waitForTimeout(2100);
 
+    assertEquals(await page.locator("a.logo img").getAttribute("src"), "/logo.png");
+    assertEquals(await page.locator('link[rel~="icon"]').getAttribute("href"), "/logo.png");
+    await page.locator("a.logo img").evaluate((logo) => logo.setAttribute("src", "/logo.svg"));
+    await page.locator('a.logo img[src="/logo.png"]').waitFor();
     assertEquals(await page.locator(".nh-downloaded-controls").count(), 1);
     assertEquals(await page.locator(".nh-thumb-download-button").count(), 1);
     assertEquals(await page.locator(".nh-thumb-download-button").textContent(), "DL");

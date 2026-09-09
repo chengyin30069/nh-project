@@ -411,3 +411,84 @@ iframe,
   .nh-reader-size { margin-left: auto; }
 }
 @media (max-width: 340px) { .nh-gallery-grid { grid-template-columns: minmax(0, 220px) !important; } }
+
+/* Brand palette sampled from logo.png: cyan-blue, white, and deep navy surfaces. */
+:root {
+  --nh-blue: #008edb;
+  --nh-blue-hover: #22adf5;
+  --nh-blue-dark: #006da8;
+  --nh-page: #041019;
+  --nh-surface: #081b28;
+  --nh-raised: #0d2636;
+  --nh-elevated: #12384d;
+  --nh-input: #16445d;
+  --nh-border: #245a75;
+  --nh-text: #eaf8ff;
+  --nh-muted: #9dc1d4;
+}
+
+html, body { background-color: var(--nh-page) !important; }
+#app.theme-black {
+  --bg-page: var(--nh-page) !important;
+  --bg-primary: var(--nh-surface) !important;
+  --bg-raised: var(--nh-raised) !important;
+  --bg-elevated: var(--nh-elevated) !important;
+  --bg-input: var(--nh-input) !important;
+  --bg-hover: #1c536d !important;
+  --bg-highlight: #0b2d40 !important;
+  --text-primary: var(--nh-text) !important;
+  --text-secondary: var(--nh-muted) !important;
+  --text-muted: #719bb0 !important;
+  --text-bright: #fff !important;
+  --border: #173f55 !important;
+  --border-strong: var(--nh-border) !important;
+  --accent: var(--nh-blue) !important;
+  --accent-hover: var(--nh-blue-hover) !important;
+  --accent-dark: var(--nh-blue-dark) !important;
+  --nav-bg: var(--nh-surface) !important;
+  --nav-text: var(--nh-text) !important;
+  --nav-hover: var(--nh-elevated) !important;
+}
+
+a.logo, .nh-catalog-logo { display: inline-flex !important; align-items: center; justify-content: center; }
+a.logo img, .nh-catalog-logo img { width: 42px !important; height: 42px !important; object-fit: contain; }
+.nh-local-menu, .nh-catalog-site-header, .nh-reader-toolbar { background: var(--nh-surface); }
+.nh-catalog-body, .nh-reader { background: var(--nh-page); color: var(--nh-text); }
+.nh-catalog-panel, .nh-local-gallery-panel, .nh-content-preview, .nh-delete-dialog { background: var(--nh-surface); }
+.nh-catalog-search input, .nh-directory-filter input, .nh-directory-filter select,
+.nh-page-jump input, .nh-reader-jump input, .nh-reader-size select {
+  border-color: var(--nh-border);
+  background: var(--nh-input);
+  color: var(--nh-text);
+}
+.nh-catalog-search button, .nh-directory-filter button, .nh-page-jump button,
+.nh-catalog-pagination a, .nh-taxonomy-mode button, .nh-local-reader-button,
+.nh-page-download-button, .nh-inline-download-button, .nh-thumb-download-button,
+.nh-catalog-sort a[aria-current="true"] {
+  border-color: var(--nh-blue) !important;
+  background: var(--nh-blue) !important;
+}
+.nh-catalog-search button:hover, .nh-directory-filter button:hover, .nh-page-jump button:hover,
+.nh-catalog-pagination a:hover, .nh-taxonomy-mode button:hover, .nh-local-reader-button:hover,
+.nh-page-download-button:hover, .nh-inline-download-button:hover, .nh-thumb-download-button:hover {
+  background: var(--nh-blue-hover) !important;
+}
+.nh-taxonomy-mode button[data-mode="local"], .nh-decensored-marker { background: var(--nh-blue-dark) !important; }
+.nh-catalog-sort a, .nh-scope-toggle a, .nh-taxonomy-link,
+.nh-full-title-card > a.cover > .caption, .nh-full-title-card:hover > a.cover > .caption {
+  background: var(--nh-elevated);
+  color: var(--nh-text) !important;
+}
+.nh-taxonomy-link:hover { background: var(--nh-blue); }
+.nh-taxonomy-count { background: var(--nh-page); color: var(--nh-muted); }
+.nh-catalog-grid img, .nh-catalog-placeholder, .nh-content-thumbnail,
+.nh-full-title-card > a.cover > img { background: var(--nh-raised); }
+.nh-reader-toolbar { border-bottom-color: var(--nh-border); }
+.nh-reader-toolbar a, .nh-reader-pagination a, .nh-reader-jump button { background: var(--nh-raised); color: var(--nh-text); }
+.nh-reader-toolbar a:hover, .nh-reader-jump button:hover { background: var(--nh-elevated); }
+.nh-local-menu a:hover, .nh-catalog-panel h1 span { color: var(--nh-blue-hover) !important; }
+.nh-directory-summary, .nh-directory-filter label, .nh-page-jump label,
+.nh-reader-progress span, .nh-reader-size { color: var(--nh-muted); }
+.nh-reader :focus-visible, .nh-directory-filter :focus-visible, .nh-taxonomy-link:focus-visible {
+  outline-color: var(--nh-blue-hover);
+}

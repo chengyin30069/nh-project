@@ -12,6 +12,7 @@ RUN apk add --no-cache \
 WORKDIR /app
 
 COPY server ./server
+COPY logo.png ./logo.png
 COPY nh2_requireCfToken.sh ./nh2_requireCfToken.sh
 RUN chmod 755 /app/nh2_requireCfToken.sh
 

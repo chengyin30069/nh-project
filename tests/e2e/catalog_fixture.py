@@ -41,9 +41,6 @@ def metadata(gallery_id):
 
 class FixtureLibrary(LocalLibrary):
     def _fetch_nhentai(self, path):
-        if path == "/logo.svg":
-            logo = '<svg xmlns="http://www.w3.org/2000/svg" width="42" height="42"><rect width="42" height="42" rx="6" fill="#ed2553"/><text x="21" y="27" text-anchor="middle" font-family="sans-serif" font-size="18" fill="white">NH</text></svg>'
-            return UpstreamResponse(logo.encode(), "image/svg+xml", "utf-8", 200, path)
         if path.startswith("/api/v2/galleries/"):
             data = json.dumps(metadata(path.split("/")[-1])).encode()
             return UpstreamResponse(data, "application/json", "utf-8", 200, path)
@@ -57,13 +54,15 @@ class FixtureLibrary(LocalLibrary):
             )
             content = f'<main><section class="index-container"><h2>All galleries</h2>{cards}</section></main>'
             # Reproduce absolute captions and inline aspect padding from the upstream gallery layout.
-            source = ('<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>'
+            source = ('<html><head><meta name="viewport" content="width=device-width,initial-scale=1">'
+                      '<link rel="icon" href="/favicon.png"><style>'
                       'body{background:#111;color:#eee;margin:0}.index-container{max-width:1140px;margin:24px auto;padding:16px}'
                       '.gallery{display:inline-block;width:220px;height:345px;overflow:hidden}'
                       '.cover{position:relative;display:block}.cover img{position:absolute;top:0;width:100%}'
                       '.caption{position:absolute;bottom:0;height:32px;overflow:hidden;font:700 15px/15px Georgia,serif}.gallery:hover .caption{height:auto}'
                       '.gallery.lang-cn .caption:before{content:"";display:inline-block;float:left;width:24px;height:16px;background-image:url(/flags/cn.svg)}</style></head><body>' + content
-                      + '<script>setTimeout(()=>{const grid=document.querySelector(".index-container");grid.innerHTML=grid.innerHTML},2400)</script></body></html>')
+                      + '<script>setTimeout(()=>{const grid=document.querySelector(".index-container");grid.innerHTML=grid.innerHTML},2400)</script>'
+                      '<a class="logo"><img src="/logo.svg" alt="nhentai"></a></body></html>')
             return UpstreamResponse(source.encode(), "text/html", "utf-8", 200, path)
         if path.startswith("/g/"):
             content = '<main id="info"><h1>Remote Fixture</h1><div id="tags"><a href="/artist/alice/">Alice <span class="count" title="100 galleries">100</span></a></div></main>'
