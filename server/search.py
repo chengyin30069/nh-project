@@ -86,3 +86,46 @@ def query_terms(query: str, aliases: list[set[str]]) -> tuple[set[str], set[str]
         if " " not in term and term not in {m.group(1) for m in re.finditer(r'"([^"]+)"', normalized)}:
             fuzzy.add(term)
     return literals, fuzzy
+
+
+def query_concepts(query: str, aliases: list[set[str]]) -> list[tuple[set[str], set[str]]]:
+    """Split a query into required concepts and their alias alternatives.
+
+    The first set in each tuple contains literal alternatives.  The second set
+    contains unquoted, single-word alternatives eligible for spelling fallback.
+    Multi-word aliases written without quotes are consumed as one concept.
+    """
+    normalized = normalize(query)
+    units = [(match.group(1) or match.group(2), match.group(1) is not None)
+             for match in re.finditer(r'"([^"]+)"|(\S+)', normalized)]
+
+    def alternatives(value: str) -> set[str]:
+        expanded = {value}
+        while True:
+            previous = set(expanded)
+            for group in aliases:
+                if group & expanded:
+                    expanded.update(group)
+            if expanded == previous:
+                return expanded
+
+    alias_names = set().union(*aliases) if aliases else set()
+    concepts: list[tuple[set[str], set[str]]] = []
+    index = 0
+    while index < len(units):
+        value, quoted = units[index]
+        consumed = 1
+        if not quoted:
+            # Prefer the longest explicitly configured multi-word alias.
+            for end in range(len(units), index + 1, -1):
+                if any(is_quoted for _part, is_quoted in units[index:end]):
+                    continue
+                candidate = " ".join(part for part, _is_quoted in units[index:end])
+                if candidate in alias_names:
+                    value, consumed = candidate, end - index
+                    break
+        literal = alternatives(value)
+        fuzzy = set() if quoted else {item for item in literal if " " not in item}
+        concepts.append((literal, fuzzy))
+        index += consumed
+    return concepts

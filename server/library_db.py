@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Callable
 
 try:
-    from server.search import normalize, words, load_aliases, query_terms, spelling_limit, close_spelling
+    from server.search import normalize, words, load_aliases, query_concepts, spelling_limit, close_spelling
 except ModuleNotFoundError:
-    from search import normalize, words, load_aliases, query_terms, spelling_limit, close_spelling
+    from search import normalize, words, load_aliases, query_concepts, spelling_limit, close_spelling
 
 
 GALLERY_TYPES = ("tag", "artist", "character", "parody", "group", "language", "category")
@@ -564,31 +564,86 @@ class LibraryDatabase:
         with self._connect() as db:
             return [self._record(row) for row in db.execute("SELECT * FROM galleries ORDER BY random() LIMIT ?", (limit,))]
 
-    def search(self, query: str, *, page: int = 1, per_page: int = 25, sort: str = "id") -> tuple[list[dict[str, object]], int]:
+    def search(self, query: str, *, page: int = 1, per_page: int = 25, sort: str = "relevance") -> tuple[list[dict[str, object]], int]:
         query = query.strip()
         if not query:
-            return self.downloaded(page=page, per_page=per_page, sort=sort)
-        literals, fuzzy = query_terms(query, self.search_aliases)
+            return self.downloaded(page=page, per_page=per_page, sort="id" if sort == "relevance" else sort)
+        concepts = query_concepts(query, self.search_aliases)
+        concept_matches: list[set[str]] = []
         with self._connect() as db:
-            vocabulary = [row[0] for row in db.execute("SELECT DISTINCT term FROM gallery_search_terms")]
-        matches = set()
-        for term in fuzzy:
-            limit = spelling_limit(term)
-            if limit:
-                matches.update(word for word in vocabulary if spelling_limit(word) and close_spelling(term, word, limit))
-        clauses = []
-        params: list[object] = []
-        for term in sorted(literals):
-            clauses.append("s.document LIKE ? ESCAPE '\\'")
-            params.append("%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
-        # Exact term lookup uses the persistent vocabulary index after fuzzy expansion.
-        if matches:
-            clauses.append("g.id IN (SELECT gallery_id FROM gallery_search_terms WHERE term IN (" + ",".join("?" for _ in matches) + "))")
-            params.extend(sorted(matches))
-        return self._paged(
-            f"SELECT g.* FROM galleries g JOIN gallery_search s ON s.gallery_id=g.id WHERE ({' OR '.join(clauses) or '0'}) ORDER BY {self.sort_order(sort)}",
-            tuple(params), page, per_page,
+            for literals, fuzzy in concepts:
+                patterns = ["%" + self._escape_like(term) + "%" for term in sorted(literals)]
+                exact_sql = " OR ".join("document LIKE ? ESCAPE '\\'" for _ in patterns)
+                exact_exists = bool(db.execute(
+                    f"SELECT 1 FROM gallery_search WHERE {exact_sql} LIMIT 1", patterns
+                ).fetchone())
+                matches: set[str] = set()
+                if not exact_exists:
+                    for term in fuzzy:
+                        limit = spelling_limit(term)
+                        if not limit:
+                            continue
+                        vocabulary = [row[0] for row in db.execute(
+                            "SELECT DISTINCT term FROM gallery_search_terms WHERE length(term) BETWEEN ? AND ?",
+                            (len(term) - limit, len(term) + limit),
+                        )]
+                        for distance in range(1, limit + 1):
+                            closest = {word for word in vocabulary if close_spelling(term, word, distance)}
+                            if closest:
+                                matches.update(closest)
+                                break
+                concept_matches.append(matches)
+
+        conditions: list[str] = []
+        condition_params: list[object] = []
+        scores: list[str] = []
+        score_params: list[object] = []
+        for (literals, _fuzzy), matches in zip(concepts, concept_matches):
+            literal_conditions = []
+            literal_scores = []
+            for term in sorted(literals):
+                pattern = "%" + self._escape_like(term) + "%"
+                literal_conditions.append("s.document LIKE ? ESCAPE '\\'")
+                condition_params.append(pattern)
+                literal_scores.append(
+                    "CASE WHEN nh_normalize(g.title_english)=? OR nh_normalize(g.title_japanese)=? "
+                    "OR nh_normalize(g.title_pretty)=? THEN 100 "
+                    "WHEN nh_normalize(g.title_english) LIKE ? ESCAPE '\\' "
+                    "OR nh_normalize(g.title_japanese) LIKE ? ESCAPE '\\' "
+                    "OR nh_normalize(g.title_pretty) LIKE ? ESCAPE '\\' THEN 60 "
+                    "WHEN s.document LIKE ? ESCAPE '\\' THEN 30 ELSE 0 END"
+                )
+                score_params.extend((term, term, term, pattern, pattern, pattern, pattern))
+            match_condition = ""
+            if matches:
+                placeholders = ",".join("?" for _ in matches)
+                match_condition = f"g.id IN (SELECT gallery_id FROM gallery_search_terms WHERE term IN ({placeholders}))"
+                condition_params.extend(sorted(matches))
+                literal_scores.append(f"CASE WHEN {match_condition} THEN 10 ELSE 0 END")
+                score_params.extend(sorted(matches))
+            conditions.append("(" + " OR ".join(literal_conditions + ([match_condition] if match_condition else [])) + ")")
+            scores.append(literal_scores[0] if len(literal_scores) == 1 else "max(" + ",".join(literal_scores) + ")")
+
+        score_sql = "+".join(scores) or "0"
+        order = "relevance DESC,g.id DESC" if sort == "relevance" else self.sort_order(sort)
+        from_where = (
+            "FROM galleries g JOIN gallery_search s ON s.gallery_id=g.id "
+            f"WHERE {' AND '.join(conditions) or '0'}"
         )
+        sql = f"SELECT g.*,({score_sql}) AS relevance {from_where} ORDER BY {order}"
+        with self._connect() as db:
+            db.create_function("nh_normalize", 1, normalize, deterministic=True)
+            # Counting does not need to evaluate relevance or sort the candidates.
+            total = int(db.execute(f"SELECT count(*) {from_where}", condition_params).fetchone()[0])
+            rows = db.execute(
+                f"{sql} LIMIT ? OFFSET ?",
+                (*score_params, *condition_params, per_page, (max(1, page) - 1) * per_page),
+            ).fetchall()
+        return [self._record(row) for row in rows], total
+
+    @staticmethod
+    def _escape_like(term: str) -> str:
+        return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     def taxonomy(
         self, taxonomy_type: str, slug: str, *, page: int = 1, per_page: int = 25, sort: str = "id"

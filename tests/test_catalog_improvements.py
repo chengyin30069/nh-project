@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from server.library_db import LibraryDatabase, GALLERY_TYPES
 from server.nh_server import DownloadManager, LocalLibrary, make_library_handler, parse_networks, prefix_html_paths
-from server.search import close_spelling, load_aliases, query_terms, spelling_limit
+from server.search import close_spelling, load_aliases, query_concepts, query_terms, spelling_limit
 from test_library_db import write_gallery
 
 
@@ -40,7 +40,7 @@ class SearchTests(unittest.TestCase):
             self.assertEqual([r["id"] for r in db.search("愛麗絲")[0]], ["100"])
             self.assertEqual([r["id"] for r in db.search("アリス")[0]], ["100"])
             self.assertEqual([r["id"] for r in db.search('"ＡＬＩＣＥ－ＥＸＡＭＰＬＥ"')[0]], ["100"])
-            self.assertEqual([r["id"] for r in db.search("First Other")[0]], ["101", "100"])
+            self.assertEqual([r["id"] for r in db.search("First Other")[0]], [])
             self.assertEqual(db.search("First Alice Adventure")[1], 1)
             self.assertEqual(db.search('"Adventure First"')[1], 0)
             self.assertEqual(db.search('"First Adventure"')[1], 1)
@@ -81,6 +81,11 @@ class SearchTests(unittest.TestCase):
         self.assertTrue(close_spelling("examples", "exampels", 2))
         self.assertFalse(close_spelling("examples", "xxampxyz", 2))
         self.assertEqual(query_terms('"Alice Example"', [])[1], set())
+        aliases = [{"愛麗絲", "alice example", "アリス"}]
+        self.assertEqual(query_concepts("Alice Example adventure", aliases), [
+            ({"愛麗絲", "alice example", "アリス"}, {"愛麗絲", "アリス"}),
+            ({"adventure"}, {"adventure"}),
+        ])
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "aliases.yaml"
             self.assertEqual(load_aliases(path), [])
@@ -106,6 +111,23 @@ class SearchTests(unittest.TestCase):
             db.set_downloaded_at("9", 400)
             db.index_archive(storage / "9.cbz")
             self.assertEqual(db.gallery("9")["downloaded_at"], 400)
+
+    def test_relevance_ranking_required_terms_and_fuzzy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            db = LibraryDatabase(storage)
+            db.index_archive(write_gallery(storage, 400, metadata(400, "Unrelated", [taxonomy("tag", "Alice")])))
+            db.index_archive(write_gallery(storage, 300, metadata(300, "Alice Wonderland")))
+            db.index_archive(write_gallery(storage, 200, metadata(200, "Alice")))
+            db.index_archive(write_gallery(storage, 100, metadata(100, "Alcie Side Story")))
+
+            ids = lambda rows: [row["id"] for row in rows]
+            self.assertEqual(ids(db.search("Alice")[0]), ["200", "300", "400"])
+            self.assertEqual(ids(db.search("Alice Wonderland")[0]), ["300"])
+            # Exact results suppress spelling expansion, keeping the typo-only title out.
+            self.assertNotIn("100", ids(db.search("Alice")[0]))
+            self.assertEqual(ids(db.search("Alcie")[0]), ["100"])
+            self.assertEqual(ids(db.search("Alice", sort="id")[0]), ["400", "300", "200"])
 
 
 class CatalogRouteTests(unittest.TestCase):
@@ -137,6 +159,8 @@ class CatalogRouteTests(unittest.TestCase):
                     response, body = get(route)
                     self.assertEqual(response.status, 200)
                     self.assertIn('class="nh-catalog-sort"', body)
+                _, body = get("/downloads/search/?q=Shared")
+                self.assertIn('sort=relevance" aria-current="true">Relevance</a>', body)
                 _, body = get("/downloads/search/?q=Shared&sort=downloaded&page=99")
                 self.assertLess(body.index('href="/nh/g/9/"'), body.index('href="/nh/g/100/"'))
                 self.assertIn('name="sort" value="downloaded"', body)

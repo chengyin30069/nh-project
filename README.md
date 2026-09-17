@@ -128,11 +128,19 @@ downloaded** scope switch. Switching keeps the category or search text and
 resets pagination and sorting. An uncollected local category displays an empty
 list with a switch back to the upstream results.
 
-Download lists, search results, and taxonomy results offer **ID ↓** (numeric)
-and **Downloaded ↓** sorting. `/downloads/` defaults to download time, all other
-lists default to ID; equal timestamps use descending ID. The `sort=id` or
-`sort=downloaded` query parameter persists through pagination, with no browser
-preference storage. Changing sorting returns to page 1. Random 5 is unchanged.
+Download lists and taxonomy results offer **ID ↓** (numeric) and **Downloaded
+↓** sorting. Search results additionally offer **Relevance**, which is their
+default; exact whole-title, title substring, metadata, and spelling-fallback
+matches are ranked in that order. `/downloads/` defaults to download time and
+taxonomy lists default to ID; equal timestamps use descending ID. The selected
+`sort` query parameter persists through pagination, with no browser preference
+storage. Changing sorting returns to page 1. Random 5 is unchanged.
+
+Local search requires every entered concept to match, while alternatives from
+an explicit alias group remain interchangeable. Spelling correction is used
+only when a concept has no literal result, and only the closest allowed edit
+distance is retained. This keeps weak fuzzy matches from expanding an otherwise
+successful search.
 
 The downloaded library also has seven classification directories at
 `/downloads/tags/`, `artists/`, `characters/`, `parodies/`, `groups/`,

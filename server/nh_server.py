@@ -1019,9 +1019,9 @@ class LocalLibrary:
             self._last_random_ids = current_ids
         return self._catalog_page_html("Random 5 Downloads", records)
 
-    def local_search_html(self, query: str, page: int, sort: str = "id") -> str:
+    def local_search_html(self, query: str, page: int, sort: str = "relevance") -> str:
         self._index_for_synchronous_use()
-        sort = sort if sort in {"id", "downloaded"} else "id"
+        sort = sort if sort in {"relevance", "id", "downloaded"} else "relevance"
         requested_page = page
         records, total = self.database.search(query, page=requested_page, per_page=LOCAL_CATALOG_PAGE_SIZE, sort=sort)
         page_count = max(1, (total + LOCAL_CATALOG_PAGE_SIZE - 1) // LOCAL_CATALOG_PAGE_SIZE)
@@ -1610,7 +1610,10 @@ class LocalLibrary:
                 f'<a href="{html.escape(route)}?{html.escape(query_part)}sort={value}"'
                 + (' aria-current="true"' if value == sort else '')
                 + f'>{label}</a>'
-                for value, label in (("id", "ID ↓"), ("downloaded", "Downloaded ↓"))
+                for value, label in (
+                    (("relevance", "Relevance"), ("id", "ID ↓"), ("downloaded", "Downloaded ↓"))
+                    if route == "/downloads/search/" else (("id", "ID ↓"), ("downloaded", "Downloaded ↓"))
+                )
             ) + '</nav>'
         if page is not None and page_count is not None:
             links = []
@@ -2048,7 +2051,7 @@ def make_library_handler(
                 except ValueError:
                     page = 1
                 self._send_html(
-                    library.local_search_html(params.get("q", [""])[0], page, params.get("sort", ["id"])[0]),
+                    library.local_search_html(params.get("q", [""])[0], page, params.get("sort", ["relevance"])[0]),
                     extra_headers={"Cache-Control": "no-cache"},
                 )
                 return
