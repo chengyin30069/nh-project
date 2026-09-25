@@ -492,3 +492,28 @@ a.logo img, .nh-catalog-logo img { width: 42px !important; height: 42px !importa
 .nh-reader :focus-visible, .nh-directory-filter :focus-visible, .nh-taxonomy-link:focus-visible {
   outline-color: var(--nh-blue-hover);
 }
+
+/* Fixed overlay leaves reader sizing and gallery layout untouched. */
+.nh-assistant-root { position: fixed; right: 16px; bottom: 78px; z-index: 10020; color: #e7f4ff; font: 14px/1.5 system-ui, sans-serif; }
+.nh-assistant-root button { cursor: pointer; border: 1px solid #39789a; border-radius: 7px; padding: 7px 11px; background: #102b45; color: #e7f4ff; font: inherit; }
+.nh-assistant-root button:disabled { opacity: .55; cursor: default; }
+.nh-assistant-root button:focus-visible, .nh-assistant-root a:focus-visible, .nh-assistant-root textarea:focus-visible { outline: 2px solid #66d8ff; outline-offset: 2px; }
+.nh-assistant-toggle { box-shadow: 0 3px 12px #0008; }
+.nh-assistant-panel { position: absolute; right: 0; bottom: 48px; width: min(420px, calc(100vw - 32px)); max-height: calc(100dvh - 160px); overflow: auto; box-sizing: border-box; padding: 16px; border: 1px solid #39789a; border-radius: 12px; background: #081a2bf5; box-shadow: 0 8px 32px #0009; overflow-wrap: anywhere; }
+.nh-assistant-panel[hidden] { display: none; }
+.nh-assistant-panel header, .nh-assistant-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.nh-assistant-panel h2 { margin: 0; font: 600 19px/1.4 system-ui, sans-serif; }
+.nh-assistant-panel h3 { margin: 0; font: 600 15px/1.4 system-ui, sans-serif; }
+.nh-assistant-panel p { margin: 7px 0; }
+.nh-assistant-panel textarea { display: block; width: 100%; box-sizing: border-box; margin: 7px 0; resize: vertical; padding: 8px; color: #fff; background: #06111e; border: 1px solid #39789a; border-radius: 6px; font: inherit; }
+.nh-assistant-note { color: #9bb5c9; font-size: 12px; }
+.nh-assistant-status { color: #66d8ff; }
+.nh-assistant-panel details { margin: 12px 0; }
+.nh-assistant-panel summary { cursor: pointer; }
+.nh-assistant-card { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 12px; padding: 12px 0; border-top: 1px solid #28465c; }
+.nh-assistant-card img { width: 70px; max-height: 110px; object-fit: cover; }
+.nh-assistant-card a { display: inline-block; color: #66d8ff; margin: 8px 8px 8px 0; }
+.nh-assistant-card button { font-size: 12px; }
+@media (max-width: 480px) { .nh-assistant-root { right: 10px; bottom: 65px; } .nh-assistant-panel { width: calc(100vw - 20px); max-height: calc(100dvh - 135px); } }
+.nh-assistant-diagnostics { font-size: 12px; padding: 8px; margin: 8px 0; border: 1px solid #39789a; border-radius: 6px; }
+.nh-assistant-panel details > button { margin: 6px 6px 0 0; }

@@ -12,6 +12,7 @@ services:
     environment:
       HOME: /home/nh
       PYTHONUNBUFFERED: "1"
+      NVIDIA_API_KEY: "${NVIDIA_API_KEY:-}"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - /home/nh:/home/nh/nh

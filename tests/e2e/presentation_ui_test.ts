@@ -74,7 +74,7 @@ Deno.test("language flags, equal rows, local directories and persistent reader s
     const logoResponse = await page.request.get(`${base}/logo.svg`);
     assertEquals(logoResponse.status(), 200);
     assertEquals(logoResponse.headers()["content-type"], "image/png");
-    assert((await logoResponse.body()).length > 1_000_000);
+    assertEquals(new Uint8Array(await logoResponse.body()), await Deno.readFile(new URL("../../logo.png", import.meta.url)));
     assertEquals(
       await page.locator("body").evaluate((el) => getComputedStyle(el).backgroundColor),
       "rgb(4, 16, 25)",

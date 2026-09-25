@@ -32,9 +32,11 @@ from urllib.request import Request, urlopen
 try:
     from server.library_db import GALLERY_TYPES, LibraryDatabase, LibraryIndexer, parse_gallery_metadata
     from server.config import config_environment, find_config_path, load_yaml_config
+    from server.assistant.diagnostics import initialization_error
 except ModuleNotFoundError:  # Direct execution: python3 server/nh_server.py
     from library_db import GALLERY_TYPES, LibraryDatabase, LibraryIndexer, parse_gallery_metadata
     from config import config_environment, find_config_path, load_yaml_config
+    from assistant.diagnostics import initialization_error
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -835,6 +837,9 @@ class LocalLibrary:
         cache_settings: CacheSettings | None = None,
         cache_autostart: bool = True,
         index_autostart: bool | None = None,
+        assistant_config: dict | None = None,
+        assistant_provider=None,
+        assistant_config_source: str = "programmatic configuration",
     ) -> None:
         self.manager = manager
         self.env = dict(env or os.environ)
@@ -850,6 +855,20 @@ class LocalLibrary:
         self._last_random_ids: tuple[str, ...] = ()
         self._random_lock = threading.Lock()
         self.database = LibraryDatabase(manager.storage_dir)
+        self.assistant = None
+        self.assistant_config = dict(assistant_config or {})
+        self.assistant_config_source = assistant_config_source
+        self.assistant_init_error = None
+        if assistant_config and assistant_config.get("enabled"):
+            try:
+                try:
+                    from server.assistant.service import AssistantService
+                except ModuleNotFoundError:
+                    from assistant.service import AssistantService
+                self.assistant = AssistantService(self.database, assistant_config, self.env, assistant_provider)
+            except Exception as exc:
+                self.assistant_init_error = initialization_error(exc)
+                print(f"assistant initialization failed: {self.assistant_init_error['code']}; {self.assistant_init_error['message']}")
         self.indexer = LibraryIndexer(
             self.database,
             self._fetch_index_metadata,
@@ -857,6 +876,23 @@ class LocalLibrary:
         )
         self.manager.archive_ready_callback = self._archive_ready
         self.manager.gallery_deleted_callback = self.database.delete_gallery
+
+    def assistant_health(self):
+        enabled = bool(self.assistant_config.get("enabled", False))
+        key_name = self.assistant_config.get("api_key_env", "NVIDIA_API_KEY")
+        configured = bool(self.env.get(key_name, "").strip())
+        if self.assistant is not None:
+            data = self.assistant.health()
+        else:
+            data = dict(enabled=enabled, available=False, api_key_configured=configured,
+                        provider_state="initialization_failed" if enabled else "disabled",
+                        metadata_index={"indexed": 0, "total": self.database.assistant_count()},
+                        visual_index={"indexed": 0, "enabled": False},
+                        error=self.assistant_init_error,
+                        connection_check={"state": "not_checked"})
+        data.update(config_source=self.assistant_config_source, api_key_env=key_name,
+                    configuration_note="Configuration and environment are loaded at startup. After editing Docker config or .env, recreate the container (restart alone may retain an old file mount or environment).")
+        return data
 
     def _archive_ready(self, archive: Path) -> None:
         status = self.database.index_archive(archive)
@@ -1993,6 +2029,20 @@ def make_library_handler(
                 self._send_text("not found", status=HTTPStatus.NOT_FOUND)
                 return
             query = f"?{parsed.query}" if parsed.query else ""
+            if path.startswith(f"{LOCAL_API_PREFIX}/assistant/"):
+                if not self._assistant_origin_allowed():
+                    self._send_json({"error": "forbidden origin"}, status=HTTPStatus.FORBIDDEN)
+                    return
+                action = path.removeprefix(f"{LOCAL_API_PREFIX}/assistant/")
+                if action in {"health", "index/status"}:
+                    try:
+                        data = library.assistant_health()
+                        self._send_json(data)
+                    except Exception:
+                        self._send_json({"error": "Assistant state unavailable"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json({"error": "not available in V1"}, status=HTTPStatus.NOT_FOUND)
+                return
 
             if LOCAL_GALLERY_PAGE_RE.fullmatch(path) or LOCAL_GALLERY_READER_RE.fullmatch(path):
                 self._send_redirect(path.removeprefix("/downloads").rstrip("/") + "/" + query, no_store=True)
@@ -2164,6 +2214,33 @@ def make_library_handler(
             if path is None:
                 self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
+            if path.startswith(f"{LOCAL_API_PREFIX}/assistant/"):
+                if not self._assistant_origin_allowed():
+                    self._send_json({"error": "forbidden origin"}, status=HTTPStatus.FORBIDDEN)
+                    return
+                if library.assistant is None:
+                    self._send_json({"error": "Assistant is disabled or unavailable."}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                try:
+                    if int(self.headers.get("Content-Length", "0")) > 32768:
+                        raise ValueError("request body exceeds 32 KiB")
+                    if self.headers.get_content_type() != "application/json":
+                        raise ValueError("Content-Type must be application/json")
+                    payload = self._read_json()
+                    action = path.removeprefix(f"{LOCAL_API_PREFIX}/assistant/")
+                    if action == "check":
+                        self._send_json(library.assistant.check_connection())
+                    elif action == "recommend":
+                        self._send_json(library.assistant.recommend(payload))
+                    elif action.startswith("index/"):
+                        self._send_json(library.assistant.index(action.removeprefix("index/")), status=HTTPStatus.ACCEPTED)
+                    else:
+                        self._send_json({"error": "not available in V1"}, status=HTTPStatus.NOT_FOUND)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                except Exception:
+                    self._send_json({"error": "Assistant unavailable; local library is unaffected."}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                return
             if path not in {
                 f"{LOCAL_API_PREFIX}/download",
                 f"{LOCAL_API_PREFIX}/galleries/status",
@@ -2230,6 +2307,18 @@ def make_library_handler(
                 return
             result = library.manager.delete_gallery(gallery_id)
             self._send_json(result, status=HTTPStatus.CONFLICT if result.get("blocked") else HTTPStatus.OK)
+
+        def _assistant_origin_allowed(self) -> bool:
+            if self.headers.get("Sec-Fetch-Site") == "cross-site":
+                return False
+            origin = self.headers.get("Origin")
+            if origin is None:
+                return True
+            parsed = urlparse(origin)
+            scheme = "http"
+            if is_ip_allowed(self.client_address[0], trusted_proxies) and self.headers.get("X-Forwarded-Proto") == "https":
+                scheme = "https"
+            return parsed.scheme == scheme and parsed.netloc == self.headers.get("Host") and not parsed.username and not parsed.password
 
         def _is_allowed(self) -> bool:
             return is_ip_allowed(self._client_ip(), allowed_networks)
@@ -2521,7 +2610,9 @@ def main() -> None:
     ]
     trusted_proxies = parse_networks(args.trusted_proxies or configured_proxies)
     library = LocalLibrary(
-        manager, env=env, cache_autostart=not maintenance_mode, index_autostart=not maintenance_mode
+        manager, env=env, cache_autostart=not maintenance_mode, index_autostart=not maintenance_mode,
+        assistant_config=config.get("assistant") if not maintenance_mode else None,
+        assistant_config_source=config_path.name if config_path else "no YAML configuration loaded"
     )
     if maintenance_mode:
         if args.restore_library_db is not None:
@@ -2564,6 +2655,8 @@ def main() -> None:
     try:
         httpd.serve_forever()
     finally:
+        if library.assistant:
+            library.assistant.close()
         library_httpd.shutdown()
         library_httpd.server_close()
 

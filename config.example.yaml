@@ -40,3 +40,27 @@ cache:
   preview_max_age_seconds: 86400
   preview_max_bytes: 2147483648
   sweep_interval_seconds: 3600
+
+# V1 sends queries and bounded metadata to NVIDIA; no page images are uploaded.
+# Export NVIDIA_API_KEY in the server/Compose environment. Never put the key here.
+assistant:
+  enabled: false
+  provider: nvidia_nim
+  api_base: https://integrate.api.nvidia.com/v1
+  api_key_env: NVIDIA_API_KEY
+  parser_model: nvidia/nemotron-3.5-lightning-30b-a3b
+  quality_model: nvidia/nemotron-3-super-120b-a12b
+  embedding_model: nvidia/nemotron-3-embed-1b
+  visual_model: z-ai/glm-5-3-flash
+  result_limit: 5
+  dense_candidate_count: 80
+  rerank_candidate_count: 20
+  request_timeout_seconds: 75
+  max_retries_interactive: 2
+  max_retries_background: 6
+  background_enabled: true
+  max_remote_concurrency: 1
+  min_request_interval_ms: 1600
+  remote_image_analysis_enabled: false
+  max_remote_image_edge: 896
+  max_remote_image_bytes: 524288

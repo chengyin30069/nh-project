@@ -613,6 +613,171 @@
     });
   }
 
+  function setupAssistant() {
+    if (document.getElementById("nh-assistant")) return;
+    const key = `nh-assistant:${BASE_PATH}`;
+    let saved = {};
+    try { saved = JSON.parse(sessionStorage.getItem(key) || "{}"); } catch { /* storage unavailable */ }
+    const store = () => { try { sessionStorage.setItem(key, JSON.stringify(saved)); } catch { /* optional */ } };
+    function node(tag, text, className) {
+      const el = document.createElement(tag);
+      if (text) el.textContent = text;
+      if (className) el.className = className;
+      return el;
+    }
+    const root = node("div", "", "nh-assistant-root");
+    root.id = "nh-assistant";
+    const toggle = node("button", "Assistant", "nh-assistant-toggle");
+    toggle.type = "button";
+    toggle.setAttribute("aria-controls", "nh-assistant-panel");
+    const panel = node("aside", "", "nh-assistant-panel");
+    panel.id = "nh-assistant-panel";
+    panel.setAttribute("aria-label", "Library Assistant");
+    panel.hidden = true;
+    const header = node("header");
+    const close = node("button", "Close");
+    header.append(node("h2", "Library Assistant"), close);
+    const status = node("p", "Open to check availability.", "nh-assistant-status");
+    status.setAttribute("role", "status");
+    const disclosure = node("p", "V1 uses metadata only. Queries and metadata are sent to NVIDIA when configured; page images are not uploaded.", "nh-assistant-note");
+    const form = node("form");
+    const label = node("label", "What would you like to read?");
+    label.htmlFor = "nh-assistant-message";
+    const input = node("textarea");
+    input.id = "nh-assistant-message";
+    input.required = true;
+    input.maxLength = 4000;
+    input.rows = 3;
+    const submit = node("button", "Recommend");
+    submit.type = "submit";
+    const reset = node("button", "New search");
+    reset.type = "button";
+    const controls = node("div", "", "nh-assistant-controls");
+    controls.append(submit, reset);
+    form.append(label, input, controls);
+    const admin = node("details");
+    admin.append(node("summary", "Metadata index"));
+    const indexButton = node("button", "Build / resume index");
+    const retryButton = node("button", "Retry failed");
+    admin.append(indexButton, retryButton);
+    const output = node("div", "", "nh-assistant-results");
+    output.setAttribute("aria-live", "polite");
+    const diagnostics = node("div", "", "nh-assistant-diagnostics");
+    const checkButton = node("button", "Check NIM connection");
+    checkButton.type = "button";
+    const checkStatus = node("p", "", "nh-assistant-note");
+    panel.append(header, status, diagnostics, checkButton, checkStatus, disclosure, form, admin, output);
+    root.append(toggle, panel);
+    document.body.append(root);
+    let timer = null;
+    let busy = false;
+    let checking = false;
+    async function health() {
+      if (panel.hidden) return;
+      try {
+        const data = await request("/assistant/health");
+        const index = data.metadata_index || {};
+        const available = data.available !== false && data.enabled;
+        status.textContent = !data.enabled ? "Assistant is disabled (assistant.enabled is false or absent in the loaded configuration)." :
+          !available ? "Assistant enabled, but initialization failed." :
+          !data.api_key_configured ? "Assistant ready · API key missing · Local search only." :
+          `NIM ${data.provider_state} · Index ${index.indexed || 0}/${index.total || 0}${data.scanning ? " · Scanning" : ""}${data.background_enabled === false ? " · Background paused" : ""}`;
+        if (index.jobs) status.textContent += ` · Queued ${(index.jobs.queued || 0) + (index.jobs.retry_wait || 0)} · Failed ${index.jobs.failed || 0}`;
+        diagnostics.replaceChildren(
+          node("p", `Configuration: ${data.config_source || "server configuration"} · enabled: ${Boolean(data.enabled)}`),
+          node("p", `${data.api_key_env || "NVIDIA_API_KEY"}: ${data.api_key_configured ? "loaded by server (value hidden)" : "NOT found in server environment"}`),
+        );
+        if (data.error) diagnostics.append(node("p", `${data.error.code}: ${data.error.message}`));
+        const check = data.connection_check || {};
+        if (!checking) checkStatus.textContent = check.message || "Key presence does not verify validity. Check NIM connection to test the embedding model.";
+        if (!data.enabled || !available || !data.api_key_configured) {
+          diagnostics.append(node("p", data.configuration_note || "Restart the server after changing configuration.", "nh-assistant-note"));
+          if (!data.api_key_configured) diagnostics.append(node("p", "Docker: add NVIDIA_API_KEY to the project .env file, then run docker compose up -d --force-recreate nh-server.", "nh-assistant-note"));
+        }
+        submit.disabled = busy || !available;
+        indexButton.disabled = retryButton.disabled = !available;
+        checkButton.disabled = checking || !available;
+      } catch (error) { status.textContent = error.message; }
+    }
+    checkButton.addEventListener("click", async () => {
+      checking = true;
+      checkButton.disabled = true;
+      checkStatus.textContent = "Checking NIM connection…";
+      try {
+        const result = await request("/assistant/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        checkStatus.textContent = result.message;
+      } catch (error) { checkStatus.textContent = error.message; }
+      finally { checking = false; checkButton.disabled = false; }
+    });
+    function show(open) {
+      panel.hidden = !open;
+      toggle.setAttribute("aria-expanded", String(open));
+      saved.open = open;
+      store();
+      clearInterval(timer);
+      if (open) { health(); timer = setInterval(health, 5000); input.focus(); }
+      else toggle.focus();
+    }
+    toggle.addEventListener("click", () => show(panel.hidden));
+    close.addEventListener("click", () => show(false));
+    panel.addEventListener("keydown", (event) => { if (event.key === "Escape") { event.preventDefault(); show(false); } });
+    reset.addEventListener("click", () => { saved = { open: true }; store(); input.value = ""; output.replaceChildren(); input.focus(); });
+    for (const [button, action] of [[indexButton, "metadata"], [retryButton, "retry-failed"]]) {
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try { await request(`/assistant/index/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); await health(); }
+        catch (error) { status.textContent = error.message; }
+        finally { button.disabled = false; }
+      });
+    }
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (busy || !input.value.trim()) return;
+      busy = true;
+      submit.disabled = true;
+      output.replaceChildren(node("p", "Finding recommendations…"));
+      try {
+        const data = await request("/assistant/recommend", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: input.value, mode: "fast", limit: 5, previous_plan: saved.previous_plan || null }) });
+        saved.previous_plan = data.plan;
+        saved.last_result_ids = (data.results || []).map((r) => r.id);
+        saved.request_id = data.request_id;
+        store();
+        output.replaceChildren(node("p", data.assistant_text));
+        for (const warning of data.warnings || []) output.append(node("p", warning, "nh-assistant-note"));
+        for (const term of data.unresolved_terms || []) output.append(node("p", `Unresolved ${term.kind}: ${term.value}`));
+        for (const result of data.results || []) {
+          if (!/^[1-9][0-9]*$/.test(result.id)) continue;
+          const card = node("article", "", "nh-assistant-card");
+          const cover = node("img");
+          cover.src = `${BASE_PATH}/catalog-thumbnail/${result.id}`;
+          cover.alt = "";
+          cover.loading = "lazy";
+          const details = node("div");
+          details.append(node("h3", result.title), node("p", `${result.id} · ${result.pages || "Unknown"} pages`));
+          for (const reason of (result.reasons || []).slice(0, 3)) details.append(node("p", reason));
+          const link = node("a", "Open gallery");
+          link.href = `${BASE_PATH}/g/${result.id}/`;
+          const exclude = node("button", "Exclude from next search");
+          exclude.addEventListener("click", () => {
+            saved.previous_plan.excluded_gallery_ids = [...new Set([...(saved.previous_plan.excluded_gallery_ids || []), result.id])].slice(-100);
+            store();
+            exclude.disabled = true;
+            exclude.textContent = "Excluded";
+          });
+          details.append(link, exclude);
+          card.append(cover, details);
+          output.append(card);
+        }
+      } catch (error) { output.replaceChildren(node("p", error.message)); }
+      finally { busy = false; submit.disabled = false; }
+    });
+    toggle.setAttribute("aria-expanded", "false");
+    if (saved.open && !document.body.classList.contains("nh-reader")) show(true);
+  }
+
+  setupAssistant();
+
   if (document.body.classList.contains("nh-reader")) {
     setupReader();
     return;

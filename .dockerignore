@@ -9,3 +9,7 @@ cookie.sh
 deploy
 docs
 nh
+
+.env
+.env.*
+!.env.example

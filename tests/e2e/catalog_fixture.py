@@ -86,7 +86,10 @@ with tempfile.TemporaryDirectory() as tmp:
             for page in (1, 2):
                 cbz.writestr(f"{page}.png", (PORTRAIT if page == 1 else LANDSCAPE) if gallery_id == 9 else PNG)
         os.utime(archive, (stamp, stamp))
-    library = FixtureLibrary(DownloadManager(storage_dir=storage, autostart=False), cache_autostart=False)
+    from server.assistant.provider import FakeModelProvider
+    library = FixtureLibrary(DownloadManager(storage_dir=storage, autostart=False), cache_autostart=False,
+        assistant_config={"enabled": True, "background_enabled": False} if os.environ.get("NH_ASSISTANT_FIXTURE") else None,
+        assistant_provider=FakeModelProvider())
     handler = make_library_handler(library, parse_networks(["127.0.0.1/32"]), base_path="/nh")
     handler.log_message = lambda *_args: None
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)

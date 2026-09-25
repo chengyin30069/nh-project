@@ -6,6 +6,7 @@ RUN apk add --no-cache \
     ca-certificates \
     procps \
     py3-yaml \
+    py3-numpy \
     python3 \
     wget
 

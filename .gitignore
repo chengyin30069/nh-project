@@ -6,3 +6,7 @@ __pycache__/
 deploy/
 docs/
 logo.png
+
+.env
+.env.*
+!.env.example

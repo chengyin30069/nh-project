@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any
 
 
+try:
+    from server.assistant.settings import DEFAULTS as ASSISTANT_DEFAULTS, settings as assistant_settings
+except ModuleNotFoundError:
+    from assistant.settings import DEFAULTS as ASSISTANT_DEFAULTS, settings as assistant_settings
+
 CONFIG_KEYS = {
+    "assistant": set(ASSISTANT_DEFAULTS),
     "auth": {"cookie", "user_agent"},
     "server": {
         "host",
@@ -130,6 +136,7 @@ def _resolve_config_path(value: str, config_path: Path | None) -> str:
 
 
 def _validate_config(config: dict[str, Any]) -> None:
+    assistant_settings(config.get("assistant", {}))
     auth = config.get("auth", {})
     for name in ("cookie", "user_agent"):
         if name in auth and not isinstance(auth[name], str):

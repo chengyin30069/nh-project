@@ -17,6 +17,12 @@ handoff notes are maintained in [`project.md`](project.md).
 YAML configuration, Docker server deployment, and SQLite-only library restoration
 are documented in [`doc/docker_server.md`](doc/docker_server.md).
 
+## Library Assistant (V1)
+
+Optional metadata-only NVIDIA NIM recommendations, resumable indexing, and local
+search fallback are available in the shared library UI. See
+[`doc/assistant.md`](doc/assistant.md) for configuration, indexing, and tests.
+
 ## Branding
 
 The library server uses the repository-root `logo.png` for its visible header

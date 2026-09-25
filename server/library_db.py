@@ -96,6 +96,8 @@ class LibraryDatabase:
         self.path = storage_dir / ".nh-local" / "library.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._write_lock = threading.RLock()
+        self.assistant_change_callback = None
+        self.assistant_delete_callback = None
         alias_path = Path(os.environ.get("NH_SEARCH_ALIASES_FILE", str(storage_dir / ".nh-local" / "search-aliases.yaml")))
         self.search_aliases = load_aliases(alias_path)
         self._initialize()
@@ -176,6 +178,9 @@ class LibraryDatabase:
                 END;
                 """
             )
+            gallery_columns = {row[1] for row in db.execute("PRAGMA table_info(galleries)")}
+            if "num_pages" not in gallery_columns:
+                db.execute("ALTER TABLE galleries ADD COLUMN num_pages INTEGER")
             columns = {row[1] for row in db.execute("PRAGMA table_info(gallery_taxonomies)")}
             if "source_taxonomy_id" not in columns:
                 db.execute("ALTER TABLE gallery_taxonomies ADD COLUMN source_taxonomy_id INTEGER")
@@ -289,6 +294,13 @@ class LibraryDatabase:
         cover_path = str(cover.get("path") or "")
         if not cover_url and cover_path:
             cover_url = f"https://t.nhentai.net/{cover_path}"
+        pages = metadata.get("num_pages")
+        if type(pages) is not int or not 1 <= pages <= 10000:
+            try:
+                with zipfile.ZipFile(archive) as cbz:
+                    pages = sum(1 for name in cbz.namelist() if re.search(r"(?:^|/)[0-9]+\.(?:jpe?g|png|webp|gif|avif)$", name, re.I)) or None
+            except (OSError, zipfile.BadZipFile):
+                pages = None
         tags = metadata.get("tags") if isinstance(metadata.get("tags"), list) else []
         with self._write_lock, self._connect() as db:
             db.execute(
@@ -319,6 +331,7 @@ class LibraryDatabase:
                     time.time(),
                 ),
             )
+            db.execute("UPDATE galleries SET num_pages=? WHERE id=?", (pages, gallery_id))
             db.execute("DELETE FROM gallery_taxonomies WHERE gallery_id=?", (gallery_id,))
             affected_ids = {gallery_id}
             for position, tag in enumerate(tags):
@@ -364,6 +377,19 @@ class LibraryDatabase:
             # Names can be updated on a shared taxonomy; refresh all affected records.
             for affected_id in affected_ids:
                 self._update_search(db, affected_id)
+
+        for affected_id in affected_ids:
+            self._assistant_notify("change", affected_id)
+
+    def _assistant_notify(self, action, gallery_id):
+        callback = getattr(self, f"assistant_{action}_callback", None)
+        if callback:
+            try:
+                callback(str(gallery_id))
+            except Exception:
+                # Optional sidecar failures cannot break authoritative catalog writes.
+                import logging
+                logging.getLogger(__name__).warning("assistant catalog hook failed")
 
     @staticmethod
     def _resolve_taxonomy(
@@ -450,6 +476,8 @@ class LibraryDatabase:
                 "DELETE FROM taxonomies WHERE NOT EXISTS (SELECT 1 FROM gallery_taxonomies gt WHERE gt.taxonomy_id=taxonomies.id AND gt.taxonomy_type=taxonomies.type)"
             )
 
+        self._assistant_notify("delete", gallery_id)
+
     def pending_ids(self) -> list[str]:
         with self._connect() as db:
             rows = db.execute("SELECT id FROM galleries WHERE metadata_status='pending' ORDER BY id DESC").fetchall()
@@ -465,6 +493,10 @@ class LibraryDatabase:
             db.execute(
                 "DELETE FROM taxonomies WHERE NOT EXISTS (SELECT 1 FROM gallery_taxonomies gt WHERE gt.taxonomy_id=taxonomies.id AND gt.taxonomy_type=taxonomies.type)"
             )
+
+        for row in rows:
+            if row["id"] not in archive_ids:
+                self._assistant_notify("delete", row["id"])
 
     def gallery(self, gallery_id: str) -> dict[str, object] | None:
         with self._connect() as db:
@@ -489,6 +521,98 @@ class LibraryDatabase:
         record["title"] = record["title_english"] or record["title_pretty"] or f"Gallery {gallery_id}"
         record["secondary_title"] = record["title_japanese"] or ""
         return record
+
+    def assistant_gallery(self, gallery_id):
+        records = self.assistant_records([int(gallery_id)])
+        return records[0] if records else None
+
+    def assistant_count(self):
+        with self._connect() as db:
+            return db.execute("SELECT count(*) FROM galleries").fetchone()[0]
+
+    def assistant_catalog_batch(self, *, after_id=None, limit=250):
+        cursor = after_id or 0
+        while True:
+            with self._connect() as db:
+                ids = [r[0] for r in db.execute("SELECT id FROM galleries WHERE id>? ORDER BY id LIMIT ?", (cursor, min(500, max(1, limit))))]
+            if not ids:
+                return []
+            records = self.assistant_records(ids)
+            if records:
+                return records
+            cursor = ids[-1]
+
+    def assistant_records(self, gallery_ids):
+        if len(gallery_ids) > 500:
+            raise ValueError("assistant record batch too large")
+        if not gallery_ids:
+            return []
+        marks = ','.join('?' for _ in gallery_ids)
+        with self._connect() as db:
+            records = {r['id']: dict(r) | {'tags': []} for r in db.execute(f"SELECT id,title_english,title_japanese,title_pretty,num_pages FROM galleries WHERE id IN ({marks})", gallery_ids)}
+            for tag in db.execute(f"""SELECT gt.gallery_id,t.id,t.type,t.name,t.slug FROM gallery_taxonomies gt
+                JOIN taxonomies t ON t.id=gt.taxonomy_id AND t.type=gt.taxonomy_type
+                WHERE gt.gallery_id IN ({marks}) ORDER BY gt.position""", gallery_ids):
+                records[tag['gallery_id']]['tags'].append(dict(tag))
+        result = []
+        for record in records.values():
+            if not (self.storage_dir / f"{record['id']}.cbz").is_file():
+                continue
+            record['id'] = str(record['id'])
+            record['title'] = record['title_english'] or record['title_pretty'] or f"Gallery {record['id']}"
+            result.append(record)
+        return result
+
+    def assistant_backfill_pages(self, gallery_id):
+        """Explicit index scans may fill legacy page counts locally, without HTTP."""
+        record = self.assistant_gallery(gallery_id)
+        if record and record['num_pages'] is None:
+            try:
+                with zipfile.ZipFile(self.storage_dir / f"{gallery_id}.cbz") as cbz:
+                    count = sum(1 for name in cbz.namelist() if re.search(r"(?:^|/)[0-9]+\.(?:jpe?g|png|webp|gif|avif)$", name, re.I))
+                if count:
+                    with self._write_lock, self._connect() as db:
+                        db.execute("UPDATE galleries SET num_pages=? WHERE id=?", (count, int(gallery_id)))
+                    record['num_pages'] = count
+            except (OSError, zipfile.BadZipFile):
+                pass
+        return record
+
+    def assistant_resolve(self, term):
+        literal = {normalize(term['value'])}
+        while True:
+            expanded = set(literal)
+            for group in self.search_aliases:
+                if group & literal:
+                    expanded.update(group)
+            if literal == expanded:
+                break
+            literal = expanded
+        with self._connect() as db:
+            rows = [dict(r) for r in db.execute("SELECT id,type,name,slug FROM taxonomies WHERE type=?", (term['kind'],))]
+        exact = [r for r in rows if {normalize(r['name']), normalize(r['slug'])} & literal]
+        if exact:
+            return exact[0] if len(exact) == 1 else None
+        for distance in (1, 2):
+            matches = [r for r in rows if any(spelling_limit(v) >= distance and any(close_spelling(v, n, distance) for n in (normalize(r['name']), normalize(r['slug']))) for v in literal)]
+            if matches:
+                return matches[0] if len(matches) == 1 else None
+        return None
+
+    def assistant_filter_candidates(self, *, required_terms, excluded_terms, min_pages=None, max_pages=None, limit=5000, after_id=0):
+        clauses, params = ['g.id>?'], [after_id]
+        for terms, negative in ((required_terms, False), (excluded_terms, True)):
+            for term in terms:
+                clauses.append(('NOT ' if negative else '') + 'EXISTS (SELECT 1 FROM gallery_taxonomies t WHERE t.gallery_id=g.id AND t.taxonomy_type=? AND t.taxonomy_id=?)')
+                params.extend([term['type'], term['id']])
+        if min_pages is not None:
+            clauses.append('g.num_pages>=?')
+            params.append(min_pages)
+        if max_pages is not None:
+            clauses.append('g.num_pages<=?')
+            params.append(max_pages)
+        with self._connect() as db:
+            return [r[0] for r in db.execute('SELECT g.id FROM galleries g WHERE ' + ' AND '.join(clauses) + ' ORDER BY g.id LIMIT ?', params + [min(5000, max(1, limit))])]
 
     def set_downloaded_at(self, gallery_id: str, downloaded_at: float) -> None:
         with self._write_lock, self._connect() as db:
@@ -522,6 +646,8 @@ class LibraryDatabase:
                     "cover_url": row["cover_url"],
                     "tags": [],
                 }
+                if "num_pages" in row.keys():
+                    metadata["num_pages"] = row["num_pages"]
                 if row["media_id"] is not None:
                     metadata["media_id"] = int(row["media_id"])
                 tags = source.execute(
