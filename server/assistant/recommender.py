@@ -1,6 +1,7 @@
 """Metadata-only recommendation with authoritative final verification."""
 import json
 import uuid
+import time
 
 try:
     from server.search import normalize, query_concepts
@@ -40,19 +41,30 @@ class Recommender:
         for attempt in range(2):
             try:
                 response = self.provider.chat(model=self.config['parser_model' if purpose == 'parse' else 'quality_model'],
-                    messages=messages, max_tokens=1200 if purpose == 'parse' else 2200, temperature=.1, purpose=purpose)
+                    messages=messages, max_tokens=600 if purpose == 'parse' else 250, temperature=.1, purpose=purpose)
             except ProviderError:
                 warnings.append(f'{purpose}: remote unavailable; local metadata fallback.')
                 return None
             try:
                 return validator(json_object(response.text))
             except (ValueError, TypeError, KeyError):
-                messages.extend([{'role': 'assistant', 'content': response.text[:12000]},
+                messages.extend([{'role': 'assistant', 'content': response.text[:3000]},
                                  {'role': 'user', 'content': prompts.REPAIR + ' Validation failed: invalid schema or candidate IDs.'}])
         warnings.append(f'{purpose}: invalid model response; local metadata fallback.')
         return None
 
-    def recommend(self, request):
+    def recommend(self, request, progress=None):
+        started = time.monotonic()
+        timings = {}
+        last = [started, 'parse']
+        def stage(name):
+            now = time.monotonic()
+            timings[last[1]] = round(now-last[0], 3)
+            last[:] = [now, name]
+            if progress:
+                progress(name)
+        if progress:
+            progress('parse')
         request = validate_request(request, self.config['result_limit'])
         warnings = []
         count = request['limit']
@@ -61,6 +73,7 @@ class Recommender:
             # Preserve already validated hard conditions during an offline follow-up.
             plan = validate_plan((request['previous_plan'] or {}) | {'semantic_query': request['message'], 'requested_count': count}, count)
             warnings.append('Natural-language interpretation unavailable; using local search and previous filters.')
+        stage('filters')
         count = min(count, plan['requested_count'])
         if request['mode'] == 'deep' or plan['visual_query'] or plan['narrative_query']:
             warnings.append('V1 uses metadata only; visual and narrative analysis is unavailable.')
@@ -73,7 +86,7 @@ class Recommender:
                     target.append(resolved)
                 else:
                     unresolved.append(dict(term) | {'constraint': key})
-        response = dict(request_id=uuid.uuid4().hex, status='ready', assistant_text='Recommendations based on local metadata.',
+        response = dict(timings=timings, request_id=uuid.uuid4().hex, status='ready', assistant_text='Recommendations based on local metadata.',
                         plan=plan, unresolved_terms=unresolved, results=[], warnings=warnings)
         if unresolved:
             warnings.append('Some taxonomy terms are unresolved or ambiguous and were not applied as hard filters.')
@@ -89,21 +102,45 @@ class Recommender:
         allowed.difference_update(int(i) for i in plan['excluded_gallery_ids'])
         if not allowed:
             response['assistant_text'] = 'No downloaded galleries match these filters.'
+            stage('ready')
+            response['elapsed_seconds'] = round(time.monotonic()-started, 3)
             return response
+        stage('semantic')
         dense = {}
-        if self.provider.configured:
+        self.vectors.refresh()
+        if self.provider.configured and len(self.vectors.snapshot[1]):
             try:
                 vector = self.provider.embed_texts(model=self.config['embedding_model'], texts=[plan['semantic_query'] or request['message']], input_type='query', purpose='query')[0]
                 dense = dict(self.vectors.search(vector, allowed=allowed, limit=self.config['dense_candidate_count']))
             except (ProviderError, ValueError, IndexError):
                 warnings.append('Semantic search unavailable; using local metadata ordering.')
+        stage('local_search')
         lexical, _ = self.library.search(plan['semantic_query'] or request['message'], per_page=self.config['dense_candidate_count'])
         lexical_ids = {int(r['id']) for r in lexical} & allowed
         concepts = query_concepts(plan['semantic_query'] or request['message'], self.library.search_aliases)
         preferred = [(term, self.library.assistant_resolve(term)) for term in plan['preferred'] if term['kind'] in {'tag', 'artist', 'character', 'parody', 'group', 'language', 'category'}]
         scored, records = [], {}
-        ids = sorted(allowed)
-        # Scan only bounded local batches; no catalog-wide prompt or HTTP payload.
+        pool = set(dense) | lexical_ids
+        budget = min(self.config['dense_candidate_count'], 100)
+        # SQL identifies exact preferences without loading every gallery/taxonomy
+        # or stat-ing 15k archives. Only this bounded pool is materialized below.
+        for _, term in preferred:
+            if term:
+                pool.update(set(self.library.assistant_filter_candidates(
+                    required_terms=required+[term], excluded_terms=excluded,
+                    min_pages=bounds['min'] if bounds['hard'] else None,
+                    max_pages=bounds['max'] if bounds['hard'] else None, limit=budget)) & allowed)
+            if len(pool) >= 400:
+                break
+        if required or bounds['min'] or bounds['max']:
+            pool.update(set(self.library.assistant_filter_candidates(
+                required_terms=required, excluded_terms=excluded,
+                min_pages=bounds['min'] if bounds['hard'] else None,
+                max_pages=bounds['max'] if bounds['hard'] else None,
+                prefer_short=bool(bounds['max']), prefer_long=bool(bounds['min'] and not bounds['max']),
+                limit=budget)) & allowed)
+        ranked_pool = list(dict.fromkeys([*dense, *sorted(lexical_ids), *sorted(pool)]))
+        ids = [gid for gid in ranked_pool if gid in allowed][:400]
         for offset in range(0, len(ids), 500):
             for record in self.library.assistant_records(ids[offset:offset+500]):
                 if not matches(record, required, excluded, plan):
@@ -147,10 +184,12 @@ class Recommender:
             if value['results'] and not chosen:
                 raise ValueError('unknown candidate IDs')
             return chosen[:count]
-        if packet and self.provider.configured:
+        stage('rerank')
+        if packet and self.provider.configured and self.config['rerank_enabled']:
             ranking = self._chat(prompts.RERANK, dict(candidates=packet, requested_count=count, plan=plan), 'rerank', validate_ranking, warnings)
             if ranking is not None:
                 selected = ranking
+        stage('verify')
         for gid in selected:
             record = self.library.assistant_gallery(str(gid))
             if not record or not matches(record, required, excluded, plan):
@@ -167,4 +206,6 @@ class Recommender:
                 match_sources=['metadata'] + (['semantic'] if gid in dense else [])))
         if not response['results']:
             response['assistant_text'] = 'No downloaded galleries match this request.'
+        stage('ready')
+        response['elapsed_seconds'] = round(time.monotonic()-started, 3)
         return response

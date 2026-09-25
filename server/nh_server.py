@@ -1600,6 +1600,16 @@ class LocalLibrary:
             self._catalog_records[archive.stem] = (stamp, record)
         return record
 
+    def assistant_html(self) -> str:
+        return (
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>Library Assistant</title><link rel="icon" href="/logo.png">'
+            f'<link rel="stylesheet" href="{LOCAL_ASSET_PREFIX}/local.css">'
+            f'<script defer src="{LOCAL_ASSET_PREFIX}/local.js"></script></head>'
+            '<body class="nh-assistant-page"><noscript>This page requires JavaScript.</noscript></body></html>'
+        )
+
     def _catalog_page_html(
         self,
         title: str,
@@ -2040,8 +2050,16 @@ def make_library_handler(
                         self._send_json(data)
                     except Exception:
                         self._send_json({"error": "Assistant state unavailable"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                elif action.startswith("jobs/") and library.assistant:
+                    job = library.assistant.requests.get(action.removeprefix("jobs/"))
+                    self._send_json(job or {"error": "Search expired or server restarted. Submit the search again."},
+                                    status=HTTPStatus.OK if job else HTTPStatus.NOT_FOUND)
                 else:
                     self._send_json({"error": "not available in V1"}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            if path.rstrip("/") == "/AI_assistant":
+                self._send_html(library.assistant_html(), extra_headers={"Cache-Control": "no-store"})
                 return
 
             if LOCAL_GALLERY_PAGE_RE.fullmatch(path) or LOCAL_GALLERY_READER_RE.fullmatch(path):
@@ -2231,7 +2249,7 @@ def make_library_handler(
                     if action == "check":
                         self._send_json(library.assistant.check_connection())
                     elif action == "recommend":
-                        self._send_json(library.assistant.recommend(payload))
+                        self._send_json(library.assistant.submit(payload), status=HTTPStatus.ACCEPTED)
                     elif action.startswith("index/"):
                         self._send_json(library.assistant.index(action.removeprefix("index/")), status=HTTPStatus.ACCEPTED)
                     else:
@@ -2390,7 +2408,7 @@ def make_library_handler(
             return payload
 
         def _send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
-            self._send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=status)
+            self._send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=status, extra_headers={"Cache-Control": "no-store"})
 
         def _send_bytes(
             self,

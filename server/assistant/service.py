@@ -1,5 +1,8 @@
 """Optional assistant lifecycle facade used by the existing HTTP server."""
 import os
+from contextlib import nullcontext
+from .requests import RequestQueue
+from .schema import validate_request
 import sqlite3
 import time
 from .settings import settings
@@ -18,7 +21,7 @@ class AssistantService:
         self.library = library
         self.enabled = self.config['enabled']
         self.connection_check = {'state': 'not_checked'}
-        self.provider = self.db = self.indexer = None
+        self.provider = self.db = self.indexer = self.requests = None
         if not self.enabled:
             return
         path = library.path.parent / 'assistant.sqlite3'
@@ -37,6 +40,7 @@ class AssistantService:
         self.vectors = VectorIndex(self.db, self.config['embedding_model'])
         self.indexer = AssistantIndexer(library, self.db, self.provider, self.config, self.vectors)
         self.recommender = Recommender(library, self.provider, self.config, self.vectors)
+        self.requests = RequestQueue(self.recommend)
         library.assistant_change_callback = self.indexer.enqueue
         library.assistant_delete_callback = self.indexer.delete
         if self.db.model('embedding', self.config['embedding_model']):
@@ -68,10 +72,15 @@ class AssistantService:
         self.connection_check['checked_at'] = time.time()
         return self.connection_check
 
-    def recommend(self, payload):
+    def submit(self, payload):
+        return self.requests.submit(validate_request(payload, self.config["result_limit"]))
+
+    def recommend(self, payload, progress=None):
         if not self.enabled:
             raise ValueError('Assistant is disabled in server configuration.')
-        return self.recommender.recommend(payload)
+        budget = getattr(self.provider, 'interactive_budget', nullcontext)
+        with budget():
+            return self.recommender.recommend(payload, progress=progress)
 
     def index(self, action):
         if not self.enabled:
@@ -91,6 +100,8 @@ class AssistantService:
         raise ValueError('Index action is not available in V1.')
 
     def close(self):
+        if self.requests:
+            self.requests.close()
         self.library.assistant_change_callback = None
         self.library.assistant_delete_callback = None
         if self.indexer:

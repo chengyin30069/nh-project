@@ -38,7 +38,7 @@ class HTTPTests(unittest.TestCase):
         self.assertTrue(data['enabled'])
         self.assertEqual(data["api_key_env"], "NVIDIA_API_KEY")
         self.assertTrue(data["available"])
-        self.assertEqual(self.request('recommend', {'message': 'book'})[0], 200)
+        self.assertEqual(self.request('recommend', {'message': 'book'})[0], 202)
         self.assertEqual(self.request('recommend', {'message': 'x'*4001})[0], 400)
         self.assertEqual(self.request('recommend', {'message': 'x'*33000})[0], 400)
         self.assertEqual(self.request('recommend', {'message': 'book'}, {'Origin': 'https://evil.example'})[0], 403)
@@ -79,3 +79,18 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(data['code'], 'authentication_failed')
         self.assertNotIn('secret-must-not-be-shown', json.dumps(data))
         self.assertEqual(self.request('health')[1]['connection_check']['state'], 'failed')
+
+    def test_dedicated_page_and_async_poll(self):
+        import time
+        with urllib.request.urlopen(self.base.split('/_nh-local')[0]+'/AI_assistant') as res:
+            self.assertIn('nh-assistant-page', res.read().decode())
+        status, data = self.request('recommend', {'message': 'book'})
+        self.assertEqual(status, 202)
+        self.assertEqual(data['status'], 'queued')
+        for _ in range(100):
+            status, job = self.request('jobs/'+data['job_id'])
+            if job['status'] == 'ready':
+                break
+            time.sleep(.01)
+        self.assertEqual(job['status'], 'ready')
+        self.assertEqual(job['result']['results'], [])

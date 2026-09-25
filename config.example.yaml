@@ -54,9 +54,13 @@ assistant:
   visual_model: z-ai/glm-5-3-flash
   result_limit: 5
   dense_candidate_count: 80
-  rerank_candidate_count: 20
+  rerank_candidate_count: 12
+  # Default fast path: parser + query embedding, then local ranking.
+  rerank_enabled: false
+  interactive_timeout_seconds: 20
+  interactive_budget_seconds: 40
   request_timeout_seconds: 75
-  max_retries_interactive: 2
+  max_retries_interactive: 0
   max_retries_background: 6
   background_enabled: true
   max_remote_concurrency: 1

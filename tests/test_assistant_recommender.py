@@ -19,7 +19,7 @@ class RecommenderTests(unittest.TestCase):
             self.library.upsert_gallery(archive, {'id': gid, 'title': {'english': f'Calm book {gid}'}, 'num_pages': pages,
                 'tags': [{'id': 1 if artist == 'alice' else 2, 'type': 'artist', 'name': artist}]}, complete=True, source='test')
         self.provider = FakeModelProvider()
-        self.service = AssistantService(self.library, {'enabled': True, 'background_enabled': False}, provider=self.provider)
+        self.service = AssistantService(self.library, {'enabled': True, 'background_enabled': False, 'rerank_enabled': True}, provider=self.provider)
         self.addCleanup(self.service.close)
 
     def test_hard_filters_unknown_ids_and_zero_matches(self):
@@ -123,3 +123,20 @@ class RecommenderTests(unittest.TestCase):
         self.assertEqual(recovered.health()['metadata_index']['total'], 3)
         self.assertEqual(recovered.health()['metadata_index']['indexed'], 0)
         self.assertTrue(list(self.service.db.path.parent.glob('assistant.sqlite3.corrupt-*')))
+
+    def test_fast_path_skips_quality_and_bounds_metadata_reads(self):
+        self.service.config['rerank_enabled'] = False
+        from unittest.mock import patch
+        original = self.library.assistant_records
+        reads = []
+        def records(ids):
+            reads.append(len(ids))
+            return original(ids)
+        self.provider.replies = [{'semantic_query': 'Calm'}]
+        with patch.object(self.library, 'assistant_records', side_effect=records):
+            result = self.service.recommend({'message': 'Calm'})
+        self.assertTrue(result['results'])
+        self.assertFalse(any(c.get('purpose') == 'rerank' for c in self.provider.calls))
+        self.assertLessEqual(sum(reads), 405)
+        self.assertIn('elapsed_seconds', result)
+        self.assertIn('local_search', result['timings'])

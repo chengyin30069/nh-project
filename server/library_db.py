@@ -599,7 +599,7 @@ class LibraryDatabase:
                 return matches[0] if len(matches) == 1 else None
         return None
 
-    def assistant_filter_candidates(self, *, required_terms, excluded_terms, min_pages=None, max_pages=None, limit=5000, after_id=0):
+    def assistant_filter_candidates(self, *, required_terms, excluded_terms, min_pages=None, max_pages=None, limit=5000, after_id=0, prefer_short=False, prefer_long=False):
         clauses, params = ['g.id>?'], [after_id]
         for terms, negative in ((required_terms, False), (excluded_terms, True)):
             for term in terms:
@@ -611,8 +611,11 @@ class LibraryDatabase:
         if max_pages is not None:
             clauses.append('g.num_pages<=?')
             params.append(max_pages)
+        order = 'g.id'
+        if prefer_short or prefer_long:
+            order = 'g.num_pages IS NULL, g.num_pages ' + ('ASC' if prefer_short else 'DESC') + ', g.id'
         with self._connect() as db:
-            return [r[0] for r in db.execute('SELECT g.id FROM galleries g WHERE ' + ' AND '.join(clauses) + ' ORDER BY g.id LIMIT ?', params + [min(5000, max(1, limit))])]
+            return [r[0] for r in db.execute('SELECT g.id FROM galleries g WHERE ' + ' AND '.join(clauses) + ' ORDER BY ' + order + ' LIMIT ?', params + [min(5000, max(1, limit))])]
 
     def set_downloaded_at(self, gallery_id: str, downloaded_at: float) -> None:
         with self._write_lock, self._connect() as db:

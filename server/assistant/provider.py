@@ -36,7 +36,7 @@ class FakeModelProvider:
         data = json.loads(kwargs['messages'][-1]['content'])
         if 'candidates' in data:
             return ChatResult(json.dumps({'results': [{'id': r['id']} for r in data['candidates'][:5]]}))
-        return ChatResult(json.dumps({'semantic_query': data.get('message', '')}))
+        return ChatResult(json.dumps((data.get('previous_plan') or {}) | {'semantic_query': data.get('message', '')}))
     def embed_texts(self, **kwargs):
         self.calls.append(kwargs)
         return [[(x - 127) / 128 for x in hashlib.sha256(t.encode()).digest()[:8]] for t in kwargs['texts']]

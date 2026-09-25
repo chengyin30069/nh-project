@@ -615,84 +615,93 @@
 
   function setupAssistant() {
     if (document.getElementById("nh-assistant")) return;
+    const onPage = document.body.classList.contains("nh-assistant-page");
+    if (!onPage) {
+      const link = document.createElement("a");
+      link.id = "nh-assistant";
+      link.className = "nh-assistant-link";
+      link.href = `${BASE_PATH}/AI_assistant`;
+      link.textContent = "Library Assistant ↗";
+      document.body.append(link);
+      return;
+    }
     const key = `nh-assistant:${BASE_PATH}`;
     let saved = {};
-    try { saved = JSON.parse(sessionStorage.getItem(key) || "{}"); } catch { /* storage unavailable */ }
-    const store = () => { try { sessionStorage.setItem(key, JSON.stringify(saved)); } catch { /* optional */ } };
+    try { saved = JSON.parse(sessionStorage.getItem(key) || "{}"); } catch { /* optional storage */ }
+    const store = () => { try { sessionStorage.setItem(key, JSON.stringify(saved)); } catch { /* optional storage */ } };
     function node(tag, text, className) {
       const el = document.createElement(tag);
       if (text) el.textContent = text;
       if (className) el.className = className;
       return el;
     }
-    const root = node("div", "", "nh-assistant-root");
+    function button(text) { const el = node("button", text); el.type = "button"; return el; }
+    const root = node("main", "", "nh-assistant-workspace");
     root.id = "nh-assistant";
-    const toggle = node("button", "Assistant", "nh-assistant-toggle");
-    toggle.type = "button";
-    toggle.setAttribute("aria-controls", "nh-assistant-panel");
-    const panel = node("aside", "", "nh-assistant-panel");
-    panel.id = "nh-assistant-panel";
-    panel.setAttribute("aria-label", "Library Assistant");
-    panel.hidden = true;
-    const header = node("header");
-    const close = node("button", "Close");
-    header.append(node("h2", "Library Assistant"), close);
-    const status = node("p", "Open to check availability.", "nh-assistant-status");
+    const nav = node("nav", "", "nh-assistant-nav");
+    const home = node("a", "← Local library");
+    home.href = `${BASE_PATH}/downloads/`;
+    const reset = button("New search");
+    nav.append(home, reset);
+    const hero = node("header", "", "nh-assistant-hero");
+    hero.append(node("p", "YOUR LOCAL COLLECTION", "nh-assistant-eyebrow"), node("h1", "Library Assistant"),
+      node("p", "Find something to read. Describe a character, series, language or mood — then refine your results.", "nh-assistant-intro"));
+    const status = node("p", "Checking library…", "nh-assistant-status");
     status.setAttribute("role", "status");
-    const disclosure = node("p", "V1 uses metadata only. Queries and metadata are sent to NVIDIA when configured; page images are not uploaded.", "nh-assistant-note");
-    const form = node("form");
-    const label = node("label", "What would you like to read?");
+    const admin = node("details", "", "nh-assistant-admin");
+    admin.append(node("summary", "Connection & metadata index"));
+    const diagnostics = node("div", "", "nh-assistant-diagnostics");
+    const checkButton = button("Check NIM connection");
+    const checkStatus = node("p", "", "nh-assistant-note");
+    const indexButton = button("Build / resume index");
+    const retryButton = button("Retry failed");
+    const adminButtons = node("div", "", "nh-assistant-controls");
+    adminButtons.append(checkButton, indexButton, retryButton);
+    admin.append(diagnostics, adminButtons, checkStatus,
+      node("p", "V1 searches metadata. Queries and bounded metadata are sent to NVIDIA when configured. Page images are not uploaded.", "nh-assistant-note"));
+    const output = node("section", "", "nh-assistant-results");
+    output.setAttribute("aria-live", "polite");
+    output.setAttribute("aria-label", "Conversation and recommendations");
+    const empty = node("div", "", "nh-assistant-empty");
+    empty.append(node("h2", "What would you like to read?"), node("p", "Try a series and character, ask for shorter books, or exclude an artist in your follow-up."));
+    output.append(empty);
+    const form = node("form", "", "nh-assistant-composer");
+    const label = node("label", "Your request");
     label.htmlFor = "nh-assistant-message";
     const input = node("textarea");
     input.id = "nh-assistant-message";
     input.required = true;
     input.maxLength = 4000;
     input.rows = 3;
-    const submit = node("button", "Recommend");
+    input.placeholder = "Describe what you want to read…";
+    const submit = button("Recommend");
     submit.type = "submit";
-    const reset = node("button", "New search");
-    reset.type = "button";
     const controls = node("div", "", "nh-assistant-controls");
-    controls.append(submit, reset);
+    const progress = node("p", "", "nh-assistant-progress");
+    progress.setAttribute("role", "status");
+    controls.append(progress, submit);
     form.append(label, input, controls);
-    const admin = node("details");
-    admin.append(node("summary", "Metadata index"));
-    const indexButton = node("button", "Build / resume index");
-    const retryButton = node("button", "Retry failed");
-    admin.append(indexButton, retryButton);
-    const output = node("div", "", "nh-assistant-results");
-    output.setAttribute("aria-live", "polite");
-    const diagnostics = node("div", "", "nh-assistant-diagnostics");
-    const checkButton = node("button", "Check NIM connection");
-    checkButton.type = "button";
-    const checkStatus = node("p", "", "nh-assistant-note");
-    panel.append(header, status, diagnostics, checkButton, checkStatus, disclosure, form, admin, output);
-    root.append(toggle, panel);
+    root.append(nav, hero, status, admin, output, form);
     document.body.append(root);
-    let timer = null;
-    let busy = false;
-    let checking = false;
+    let busy = false, checking = false, available = false;
     async function health() {
-      if (panel.hidden) return;
+      if (document.hidden) return;
       try {
         const data = await request("/assistant/health");
         const index = data.metadata_index || {};
-        const available = data.available !== false && data.enabled;
-        status.textContent = !data.enabled ? "Assistant is disabled (assistant.enabled is false or absent in the loaded configuration)." :
+        available = data.available !== false && data.enabled;
+        status.textContent = !data.enabled ? "Assistant disabled in the loaded configuration." :
           !available ? "Assistant enabled, but initialization failed." :
-          !data.api_key_configured ? "Assistant ready · API key missing · Local search only." :
-          `NIM ${data.provider_state} · Index ${index.indexed || 0}/${index.total || 0}${data.scanning ? " · Scanning" : ""}${data.background_enabled === false ? " · Background paused" : ""}`;
-        if (index.jobs) status.textContent += ` · Queued ${(index.jobs.queued || 0) + (index.jobs.retry_wait || 0)} · Failed ${index.jobs.failed || 0}`;
-        diagnostics.replaceChildren(
-          node("p", `Configuration: ${data.config_source || "server configuration"} · enabled: ${Boolean(data.enabled)}`),
-          node("p", `${data.api_key_env || "NVIDIA_API_KEY"}: ${data.api_key_configured ? "loaded by server (value hidden)" : "NOT found in server environment"}`),
-        );
+          !data.api_key_configured ? "Local metadata search available · API key missing" :
+          `NIM ${data.provider_state} · ${index.indexed || 0} / ${index.total || 0} books indexed${data.scanning ? " · Scanning" : ""}${data.background_enabled === false ? " · Indexing paused" : ""}`;
+        diagnostics.replaceChildren(node("p", `Configuration: ${data.config_source || "server configuration"} · enabled: ${Boolean(data.enabled)}`),
+          node("p", `${data.api_key_env || "NVIDIA_API_KEY"}: ${data.api_key_configured ? "loaded by server (value hidden)" : "NOT found in server environment"}`));
+        if (index.jobs) diagnostics.append(node("p", `Queued ${(index.jobs.queued || 0) + (index.jobs.retry_wait || 0)} · Failed ${index.jobs.failed || 0}`));
         if (data.error) diagnostics.append(node("p", `${data.error.code}: ${data.error.message}`));
-        const check = data.connection_check || {};
-        if (!checking) checkStatus.textContent = check.message || "Key presence does not verify validity. Check NIM connection to test the embedding model.";
-        if (!data.enabled || !available || !data.api_key_configured) {
-          diagnostics.append(node("p", data.configuration_note || "Restart the server after changing configuration.", "nh-assistant-note"));
-          if (!data.api_key_configured) diagnostics.append(node("p", "Docker: add NVIDIA_API_KEY to the project .env file, then run docker compose up -d --force-recreate nh-server.", "nh-assistant-note"));
+        if (!checking) checkStatus.textContent = data.connection_check?.message || "Check NIM connection to verify the key and embedding model.";
+        if (!available || !data.api_key_configured) {
+          diagnostics.append(node("p", data.configuration_note || "Restart after changing configuration.", "nh-assistant-note"));
+          if (!data.api_key_configured) diagnostics.append(node("p", "Docker: set NVIDIA_API_KEY in .env, then run docker compose up -d --force-recreate nh-server.", "nh-assistant-note"));
         }
         submit.disabled = busy || !available;
         indexButton.disabled = retryButton.disabled = !available;
@@ -700,83 +709,117 @@
       } catch (error) { status.textContent = error.message; }
     }
     checkButton.addEventListener("click", async () => {
-      checking = true;
-      checkButton.disabled = true;
-      checkStatus.textContent = "Checking NIM connection…";
+      checking = true; checkButton.disabled = true; checkStatus.textContent = "Checking NIM…";
       try {
         const result = await request("/assistant/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
         checkStatus.textContent = result.message;
       } catch (error) { checkStatus.textContent = error.message; }
       finally { checking = false; checkButton.disabled = false; }
     });
-    function show(open) {
-      panel.hidden = !open;
-      toggle.setAttribute("aria-expanded", String(open));
-      saved.open = open;
-      store();
-      clearInterval(timer);
-      if (open) { health(); timer = setInterval(health, 5000); input.focus(); }
-      else toggle.focus();
-    }
-    toggle.addEventListener("click", () => show(panel.hidden));
-    close.addEventListener("click", () => show(false));
-    panel.addEventListener("keydown", (event) => { if (event.key === "Escape") { event.preventDefault(); show(false); } });
-    reset.addEventListener("click", () => { saved = { open: true }; store(); input.value = ""; output.replaceChildren(); input.focus(); });
-    for (const [button, action] of [[indexButton, "metadata"], [retryButton, "retry-failed"]]) {
-      button.addEventListener("click", async () => {
-        button.disabled = true;
+    for (const [control, action] of [[indexButton, "metadata"], [retryButton, "retry-failed"]]) {
+      control.addEventListener("click", async () => {
+        control.disabled = true;
         try { await request(`/assistant/index/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); await health(); }
         catch (error) { status.textContent = error.message; }
-        finally { button.disabled = false; }
+        finally { control.disabled = false; }
       });
+    }
+    function renderTurn(message, data) {
+      empty.remove();
+      const turn = node("article", "", "nh-assistant-turn");
+      turn.append(node("p", message, "nh-assistant-user-message"), node("h2", data.assistant_text || "Recommendations"));
+      if (data.elapsed_seconds != null) turn.append(node("p", `${data.results?.length || 0} recommendations · ${data.elapsed_seconds.toFixed(1)} seconds`, "nh-assistant-note"));
+      if ((data.warnings || []).length || (data.unresolved_terms || []).length) {
+        const notes = node("details", "", "nh-assistant-warnings");
+        notes.append(node("summary", "Search notes"));
+        for (const warning of data.warnings || []) notes.append(node("p", warning));
+        for (const term of data.unresolved_terms || []) notes.append(node("p", `Unresolved ${term.kind}: ${term.value}`));
+        turn.append(notes);
+      }
+      const grid = node("div", "", "nh-assistant-grid");
+      for (const result of data.results || []) {
+        if (!/^[1-9][0-9]*$/.test(result.id)) continue;
+        const card = node("article", "", "nh-assistant-card");
+        const coverLink = node("a"); coverLink.href = `${BASE_PATH}/g/${result.id}/`;
+        const cover = node("img"); cover.src = `${BASE_PATH}/catalog-thumbnail/${result.id}`; cover.alt = result.title; cover.loading = "lazy";
+        coverLink.append(cover);
+        const details = node("div", "", "nh-assistant-card-body");
+        details.append(node("h3", result.title), node("p", `${result.id} · ${result.pages || "Unknown"} pages`, "nh-assistant-note"));
+        const reasons = node("ul");
+        for (const reason of (result.reasons || []).slice(0, 3)) reasons.append(node("li", reason));
+        const link = node("a", "Open gallery →"); link.href = coverLink.href;
+        const exclude = button("Exclude from next search");
+        exclude.addEventListener("click", () => {
+          saved.previous_plan ||= {};
+          saved.previous_plan.excluded_gallery_ids = [...new Set([...(saved.previous_plan.excluded_gallery_ids || []), result.id])].slice(-100);
+          store(); exclude.disabled = true; exclude.textContent = "Excluded";
+        });
+        details.append(reasons, link, exclude); card.append(coverLink, details); grid.append(card);
+      }
+      turn.append(grid); output.append(turn);
+      while (output.children.length > 5) output.firstElementChild.remove();
+      return turn;
+    }
+    const stages = { queued: "Waiting for the previous search…", parse: "Understanding your request…", filters: "Applying library filters…", semantic: "Finding similar metadata…", local_search: "Searching the local library…", rerank: "Ranking matches…", verify: "Checking available books…", ready: "Ready" };
+    async function poll(jobId) {
+      let failures = 0;
+      for (;;) {
+        if (document.hidden) { await new Promise((r) => setTimeout(r, 1000)); continue; }
+        let job;
+        try { job = await request(`/assistant/jobs/${encodeURIComponent(jobId)}`); failures = 0; }
+        catch (error) {
+          if (++failures >= 3) throw error;
+          progress.textContent = "Connection interrupted. Reconnecting…";
+          await new Promise((r) => setTimeout(r, 2000)); continue;
+        }
+        if (job.status === "ready") return job.result;
+        if (job.status === "failed") throw new Error(job.error || "Search failed. Please try again.");
+        progress.textContent = stages[job.stage] || "Searching…";
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    async function finishSearch(initial) {
+      busy = true; submit.disabled = reset.disabled = true;
+      const message = saved.pending_message || input.value;
+      try {
+        const data = initial?.status === "ready" ? initial : await poll(saved.job_id);
+        saved.previous_plan = data.plan;
+        saved.last_result_ids = (data.results || []).map((r) => r.id);
+        saved.turns = [...(saved.turns || []), { message, data }].slice(-5);
+        delete saved.job_id; delete saved.pending_message; store();
+        renderTurn(message, data).scrollIntoView({ block: "start" }); input.value = "";
+        progress.textContent = "Ready for a follow-up.";
+      } catch (error) {
+        progress.textContent = `${error.message} You can submit again.`;
+        delete saved.job_id; delete saved.pending_message; store();
+      } finally { busy = false; submit.disabled = !available; reset.disabled = false; }
     }
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (busy || !input.value.trim()) return;
-      busy = true;
-      submit.disabled = true;
-      output.replaceChildren(node("p", "Finding recommendations…"));
+      busy = true; submit.disabled = reset.disabled = true;
+      progress.textContent = "Starting search…";
+      saved.pending_message = input.value;
       try {
-        const data = await request("/assistant/recommend", { method: "POST", headers: { "Content-Type": "application/json" },
+        const job = await request("/assistant/recommend", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: input.value, mode: "fast", limit: 5, previous_plan: saved.previous_plan || null }) });
-        saved.previous_plan = data.plan;
-        saved.last_result_ids = (data.results || []).map((r) => r.id);
-        saved.request_id = data.request_id;
-        store();
-        output.replaceChildren(node("p", data.assistant_text));
-        for (const warning of data.warnings || []) output.append(node("p", warning, "nh-assistant-note"));
-        for (const term of data.unresolved_terms || []) output.append(node("p", `Unresolved ${term.kind}: ${term.value}`));
-        for (const result of data.results || []) {
-          if (!/^[1-9][0-9]*$/.test(result.id)) continue;
-          const card = node("article", "", "nh-assistant-card");
-          const cover = node("img");
-          cover.src = `${BASE_PATH}/catalog-thumbnail/${result.id}`;
-          cover.alt = "";
-          cover.loading = "lazy";
-          const details = node("div");
-          details.append(node("h3", result.title), node("p", `${result.id} · ${result.pages || "Unknown"} pages`));
-          for (const reason of (result.reasons || []).slice(0, 3)) details.append(node("p", reason));
-          const link = node("a", "Open gallery");
-          link.href = `${BASE_PATH}/g/${result.id}/`;
-          const exclude = node("button", "Exclude from next search");
-          exclude.addEventListener("click", () => {
-            saved.previous_plan.excluded_gallery_ids = [...new Set([...(saved.previous_plan.excluded_gallery_ids || []), result.id])].slice(-100);
-            store();
-            exclude.disabled = true;
-            exclude.textContent = "Excluded";
-          });
-          details.append(link, exclude);
-          card.append(cover, details);
-          output.append(card);
-        }
-      } catch (error) { output.replaceChildren(node("p", error.message)); }
-      finally { busy = false; submit.disabled = false; }
+        saved.job_id = job.job_id; store();
+        await finishSearch(job);
+      } catch (error) {
+        progress.textContent = error.message; busy = false; submit.disabled = !available; reset.disabled = false;
+        delete saved.pending_message; store();
+      }
     });
-    toggle.setAttribute("aria-expanded", "false");
-    if (saved.open && !document.body.classList.contains("nh-reader")) show(true);
+    reset.addEventListener("click", () => { if (busy) return; saved = {}; store(); input.value = ""; output.replaceChildren(empty); progress.textContent = ""; input.focus(); });
+    for (const turn of saved.turns || []) renderTurn(turn.message, turn.data);
+    health();
+    const timer = setInterval(health, 10000);
+    window.addEventListener("pagehide", () => clearInterval(timer), { once: true });
+    if (saved.job_id) finishSearch();
   }
 
   setupAssistant();
+  if (document.body.classList.contains("nh-assistant-page")) return;
 
   if (document.body.classList.contains("nh-reader")) {
     setupReader();

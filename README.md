@@ -20,7 +20,8 @@ are documented in [`doc/docker_server.md`](doc/docker_server.md).
 ## Library Assistant (V1)
 
 Optional metadata-only NVIDIA NIM recommendations, resumable indexing, and local
-search fallback are available in the shared library UI. See
+search fallback are available at `/AI_assistant` (under the configured base path).
+Searches report progress without holding a long-running HTTP connection open. See
 [`doc/assistant.md`](doc/assistant.md) for configuration, indexing, and tests.
 
 ## Branding

@@ -14,7 +14,7 @@ set `assistant.enabled: true`, and provide `NVIDIA_API_KEY` in the server proces
 or Compose environment. Keep the key out of YAML and Git. The default is disabled;
 no key or remote calls are needed to run the ordinary library.
 
-Open **Assistant → Metadata index → Build / resume index** for the first index.
+Open **Library Assistant → Connection & metadata index → Build / resume index** for the first index.
 This is an explicit operation: queries, canonical metadata during indexing, and
 bounded candidate metadata during reranking are sent to NVIDIA. No page images
 are uploaded in V1, including when `remote_image_analysis_enabled` is true.
@@ -34,7 +34,7 @@ are same-origin only. Port 8765 is unchanged.
 - `GET /_nh-local/api/assistant/health` or `/index/status` reports index coverage,
   provider state, scan state, and durable job counts without credentials.
 - `POST .../recommend` accepts `message`, `mode`, `limit`, and `previous_plan`.
-  V1 returns synchronously; `deep` requests receive metadata results with a warning.
+  Requests return 202 and are polled through `/jobs/{job_id}`; `deep` uses metadata with a warning.
 - `POST .../index/gallery/{id}` refreshes one downloaded gallery.
 - `POST .../index/retry-failed` retries failed jobs for the active embedding model.
 - New and updated metadata enqueue incremental jobs; deleted galleries invalidate
@@ -102,3 +102,47 @@ A plain `docker compose restart` does not load changed environment variables.
 Editors that replace `config.yaml` by renaming a new file can also leave an
 existing single-file Docker bind mount attached to the previous file; recreating
 the container refreshes that mount. Changes are read at startup, not hot-reloaded.
+
+## Dedicated assistant and responsive searches
+
+Open `/AI_assistant` (or `<base_path>/AI_assistant`). Library and reader pages
+link to this workspace instead of opening a sidebar. The workspace provides
+full-width conversation turns, responsive recommendation cards, follow-ups and
+an expandable connection/index section. It retains the last five turns in the
+tab's sessionStorage; the server still receives only the latest message and
+validated structured plan, not the transcript. **New search** clears that state.
+
+`POST .../assistant/recommend` now validates and returns **202** immediately with
+`job_id`, `status: queued`, and a progress stage. Poll
+`GET .../assistant/jobs/{job_id}`; a `ready` job contains the recommendation in
+`result`. The browser resumes polling after reload and pauses polling in hidden
+tabs. This prevents inference from holding a reverse-proxy request open. Requests
+are bounded to two active/queued searches, and completed jobs expire after 15
+minutes (at most 64 retained). These interactive jobs are ephemeral: after a
+server restart, submit the query again. Metadata indexing remains durable.
+
+Fast defaults use the parser and query embedding, followed by local ranking:
+
+```yaml
+assistant:
+  # Other settings are as in config.example.yaml.
+  rerank_enabled: false
+  interactive_timeout_seconds: 20
+  interactive_budget_seconds: 40
+  max_retries_interactive: 0
+  rerank_candidate_count: 12
+```
+
+The provider applies the interactive budget to queue waits and HTTP calls.
+Expired unsent requests are removed; already-sent calls finish in the provider
+worker without blocking local fallback. Background indexing retains its separate
+75-second timeout and durable retries. The optional quality rerank can be enabled
+with `rerank_enabled: true`, but shares the same interactive budget.
+
+The Nemotron chat adapter disables thinking for the configured Nemotron 3/3.5
+models. Parser output is capped at 600 tokens; optional reranking returns only
+IDs (250 tokens), because visible reasons come from verified local metadata.
+Existing embedding model and stored vectors do not need to change. Candidate
+metadata is loaded for at most 400 records plus final verification instead of
+walking the entire collection. Responses include `elapsed_seconds` and per-stage
+`timings` to distinguish local search time from hosted inference latency.
