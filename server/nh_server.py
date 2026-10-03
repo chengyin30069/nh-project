@@ -2054,6 +2054,11 @@ def make_library_handler(
                     job = library.assistant.requests.get(action.removeprefix("jobs/"))
                     self._send_json(job or {"error": "Search expired or server restarted. Submit the search again."},
                                     status=HTTPStatus.OK if job else HTTPStatus.NOT_FOUND)
+                elif action.startswith("operations/") and library.assistant:
+                    operation_id = action.removeprefix("operations/")
+                    operation = library.assistant.visual_operation(operation_id) if re.fullmatch(r"[0-9a-f]{32}", operation_id) else None
+                    self._send_json(operation or {"error": "Visual operation not found."},
+                                    status=HTTPStatus.OK if operation else HTTPStatus.NOT_FOUND)
                 else:
                     self._send_json({"error": "not available in V1"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -2250,8 +2255,19 @@ def make_library_handler(
                         self._send_json(library.assistant.check_connection())
                     elif action == "recommend":
                         self._send_json(library.assistant.submit(payload), status=HTTPStatus.ACCEPTED)
+                    elif action == "index/visual":
+                        self._send_json(library.assistant.visual_index(payload), status=HTTPStatus.ACCEPTED)
+                    elif action == "index/visual/check":
+                        self._send_json(library.assistant.visual_check(payload))
+                    elif action == "index/visual/pilot-approve":
+                        self._send_json(library.assistant.visual_pilot_approve(payload))
+                    elif re.fullmatch(r"operations/[0-9a-f]{32}/(pause|resume|cancel)", action):
+                        if payload != {}:
+                            raise ValueError('Operation control body must be empty.')
+                        _, operation_id, control = action.split('/')
+                        self._send_json(library.assistant.visual_control(operation_id, control))
                     elif action.startswith("index/"):
-                        self._send_json(library.assistant.index(action.removeprefix("index/")), status=HTTPStatus.ACCEPTED)
+                        self._send_json(library.assistant.index(action.removeprefix("index/"), payload), status=HTTPStatus.ACCEPTED)
                     else:
                         self._send_json({"error": "not available in V1"}, status=HTTPStatus.NOT_FOUND)
                 except ValueError as exc:

@@ -1,10 +1,10 @@
-# V1 Library Assistant
+# Library Assistant (V1 metadata and V2 sampled visuals)
 
-V1 adds metadata-only recommendations to the existing library server. It uses
+The baseline adds metadata recommendations to the existing library server. It uses
 local SQLite filters and NumPy vector search; NVIDIA NIM parses requests and
 ranks a bounded candidate packet. Only actual downloaded galleries can be linked.
-Reasons shown in the UI are generated from verified metadata. V1 does not infer
-page contents, visual style, or plot.
+V2 can also search stored observations from sampled pages. These observations
+describe visible style or scenes; they do not establish whole-book plot claims.
 
 ## Setup
 
@@ -14,10 +14,31 @@ set `assistant.enabled: true`, and provide `NVIDIA_API_KEY` in the server proces
 or Compose environment. Keep the key out of YAML and Git. The default is disabled;
 no key or remote calls are needed to run the ordinary library.
 
-Open **Library Assistant → Connection & metadata index → Build / resume index** for the first index.
+Open **Library Assistant → Connection & indexes → Build / resume index** for the first metadata index.
 This is an explicit operation: queries, canonical metadata during indexing, and
-bounded candidate metadata during reranking are sent to NVIDIA. No page images
-are uploaded in V1, including when `remote_image_analysis_enabled` is true.
+bounded candidate metadata during reranking are sent to NVIDIA. Ordinary
+recommendations do not upload page images.
+
+V2 image indexing is disabled by default. To try it, enable
+`remote_image_analysis_enabled` and recreate the server, then use the visual
+controls on the assistant page. The two-page compatibility check sends two
+resized pages from one selected downloaded gallery. A selected-ID pilot of
+20–50 galleries can follow a successful check. The whole-library action stays
+locked until that pilot completes with at least 20 searchable summaries and
+you explicitly approve it after reviewing quality and latency. The two-page
+compatibility check and 30-gallery basic schema/evidence pilot completed on
+2026-09-27, but retrieval usefulness was not established by that gate.
+
+The authorized full-library rollout began after the pilot, then was paused on
+2026-09-28 after a throughput and quality audit. About 634 galleries were
+searchable; 5,545 `provider_degraded` failures were largely caused by counting
+local circuit-open rejections as remote retries. That retry accounting is fixed.
+The current 4–6-page summaries often contain generic observations and cannot
+describe whole-book narrative reliably. The deployed configuration currently
+disables remote image analysis and new-download auto-indexing, and the
+`nh-visual-rollout` service is stopped. Existing visual vectors remain searchable
+for V1/V2 comparison. Run a relevance/latency evaluation before resuming bulk
+uploads or choosing another provider.
 
 The same operation is available over the existing allowed-network API:
 
@@ -37,6 +58,10 @@ are same-origin only. Port 8765 is unchanged.
   Requests return 202 and are polled through `/jobs/{job_id}`; `deep` uses metadata with a warning.
 - `POST .../index/gallery/{id}` refreshes one downloaded gallery.
 - `POST .../index/retry-failed` retries failed jobs for the active embedding model.
+- `POST .../index/visual` accepts `{"scope":"ids","gallery_ids":["123"]}` (up to 100 IDs)
+  or `{"scope":"all"}` after pilot approval. It returns a durable operation ID.
+  `GET .../operations/{id}` reports progress; POST `/pause`, `/resume`, or
+  `/cancel` on the same ID to control future work. A sent provider call can finish.
 - New and updated metadata enqueue incremental jobs; deleted galleries invalidate
   the vector snapshot. Unchanged documents are never embedded again.
 - Set `background_enabled: false` and restart to pause remote background work.

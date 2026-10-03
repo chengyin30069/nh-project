@@ -10,6 +10,7 @@ except ModuleNotFoundError:
 from . import prompts
 from .documents import compact
 from .provider import ProviderError
+from .images import source_token
 from .schema import json_object, validate_plan, validate_request
 
 TITLE_WEIGHT = 3.0
@@ -33,8 +34,9 @@ def matches(record, required, excluded, plan):
 
 
 class Recommender:
-    def __init__(self, library, provider, config, vectors):
+    def __init__(self, library, provider, config, vectors, visual_vectors=None):
         self.library, self.provider, self.config, self.vectors = library, provider, config, vectors
+        self.visual_vectors = visual_vectors
 
     def _chat(self, system, data, purpose, validator, warnings):
         messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': json.dumps(data, ensure_ascii=False)}]
@@ -75,8 +77,8 @@ class Recommender:
             warnings.append('Natural-language interpretation unavailable; using local search and previous filters.')
         stage('filters')
         count = min(count, plan['requested_count'])
-        if request['mode'] == 'deep' or plan['visual_query'] or plan['narrative_query']:
-            warnings.append('V1 uses metadata only; visual and narrative analysis is unavailable.')
+        if request['mode'] == 'deep' or plan['narrative_query']:
+            warnings.append('Narrative analysis is unavailable in ordinary search.')
         plan['mode'] = 'fast'
         unresolved, required, excluded = [], [], []
         for key, target in [('required', required), ('excluded', excluded)]:
@@ -100,6 +102,15 @@ class Recommender:
             allowed.update(batch)
             after = batch[-1]
         allowed.difference_update(int(i) for i in plan['excluded_gallery_ids'])
+        visual_query = plan['visual_query'] or ' '.join(term['value'] for term in plan['preferred'] if term['kind'] in {'visual_style', 'scene'})
+        visual_available = False
+        if self.visual_vectors:
+            self.visual_vectors.refresh()
+            visual_available = bool(len(self.visual_vectors.snapshot[1]))
+        response['coverage'] = {'visual': self.visual_vectors.db.visual_coverage(allowed, self.config['embedding_model'], self.visual_vectors.namespace)
+                                if self.visual_vectors else {'eligible': len(allowed), 'searchable': 0}}
+        if visual_query and not visual_available:
+            warnings.append('Sampled visual coverage is unavailable; metadata results remain available.')
         if not allowed:
             response['assistant_text'] = 'No downloaded galleries match these filters.'
             stage('ready')
@@ -107,11 +118,28 @@ class Recommender:
             return response
         stage('semantic')
         dense = {}
+        visual_dense = {}
         self.vectors.refresh()
-        if self.provider.configured and len(self.vectors.snapshot[1]):
+        metadata_ready = bool(len(self.vectors.snapshot[1]))
+        if self.provider.configured and (metadata_ready or (visual_available and visual_query)):
             try:
-                vector = self.provider.embed_texts(model=self.config['embedding_model'], texts=[plan['semantic_query'] or request['message']], input_type='query', purpose='query')[0]
-                dense = dict(self.vectors.search(vector, allowed=allowed, limit=self.config['dense_candidate_count']))
+                metadata_text = plan['semantic_query'] or request['message']
+                texts = list(dict.fromkeys(([metadata_text] if metadata_ready else []) + ([visual_query] if visual_available and visual_query else [])))
+                vectors = self.provider.embed_texts(model=self.config['embedding_model'], texts=texts, input_type='query', purpose='query')
+                vectors_by_text = dict(zip(texts, vectors))
+                if metadata_ready:
+                    dense = dict(self.vectors.search(vectors_by_text[metadata_text], allowed=allowed, limit=self.config['dense_candidate_count']))
+                if visual_available and visual_query:
+                    visual_dense = dict(self.visual_vectors.search(vectors_by_text[visual_query], allowed=allowed,
+                                                                 limit=self.config['visual_candidate_count']))
+                    # A changed archive cannot receive rank credit from its old sample.
+                    for gid in list(visual_dense):
+                        source = self.visual_vectors.snapshot[3].get(gid)
+                        try:
+                            if not source or source_token(self.library.storage_dir / f'{gid}.cbz') != source['source_fingerprint']:
+                                del visual_dense[gid]
+                        except OSError:
+                            del visual_dense[gid]
             except (ProviderError, ValueError, IndexError):
                 warnings.append('Semantic search unavailable; using local metadata ordering.')
         stage('local_search')
@@ -120,7 +148,7 @@ class Recommender:
         concepts = query_concepts(plan['semantic_query'] or request['message'], self.library.search_aliases)
         preferred = [(term, self.library.assistant_resolve(term)) for term in plan['preferred'] if term['kind'] in {'tag', 'artist', 'character', 'parody', 'group', 'language', 'category'}]
         scored, records = [], {}
-        pool = set(dense) | lexical_ids
+        pool = set(dense) | lexical_ids | set(visual_dense)
         budget = min(self.config['dense_candidate_count'], 100)
         # SQL identifies exact preferences without loading every gallery/taxonomy
         # or stat-ing 15k archives. Only this bounded pool is materialized below.
@@ -139,7 +167,15 @@ class Recommender:
                 max_pages=bounds['max'] if bounds['hard'] else None,
                 prefer_short=bool(bounds['max']), prefer_long=bool(bounds['min'] and not bounds['max']),
                 limit=budget)) & allowed)
-        ranked_pool = list(dict.fromkeys([*dense, *sorted(lexical_ids), *sorted(pool)]))
+        # Round-robin the two vector branches before the shared materialization cap.
+        balanced = []
+        metadata_ids, visual_ids = list(dense), list(visual_dense)
+        for offset in range(max(len(metadata_ids), len(visual_ids))):
+            if offset < len(metadata_ids):
+                balanced.append(metadata_ids[offset])
+            if offset < len(visual_ids):
+                balanced.append(visual_ids[offset])
+        ranked_pool = list(dict.fromkeys([*balanced, *sorted(lexical_ids), *sorted(pool)]))
         ids = [gid for gid in ranked_pool if gid in allowed][:400]
         for offset in range(0, len(ids), 500):
             for record in self.library.assistant_records(ids[offset:offset+500]):
@@ -161,14 +197,15 @@ class Recommender:
                         score += PAGE_WEIGHT * min(1, pages / bounds['min'])
                 if gid in lexical_ids:
                     score += TITLE_WEIGHT
-                if score > 0 or gid in dense or required or bounds['hard']:
+                if score > 0 or gid in dense or gid in visual_dense or required or bounds['hard']:
                     records[gid] = record
                     scored.append((gid, score))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         # RRF balances independent rankings without comparing cosine to text scores.
         metadata_rank = {gid: rank for rank, (gid, score) in enumerate(scored, 1) if score > 0 or required or bounds['hard']}
         dense_rank = {gid: rank for rank, gid in enumerate(dense, 1) if gid in records}
-        fused = sorted(records, key=lambda gid: (-((1/(RRF_K+metadata_rank[gid]) if gid in metadata_rank else 0) + (1/(RRF_K+dense_rank[gid]) if gid in dense_rank else 0)), gid))
+        visual_rank = {gid: rank for rank, gid in enumerate(visual_dense, 1) if gid in records}
+        fused = sorted(records, key=lambda gid: (-sum(1/(RRF_K+ranking[gid]) for ranking in (metadata_rank, dense_rank, visual_rank) if gid in ranking), gid))
         candidates = fused[:self.config['rerank_candidate_count']]
         selected = candidates[:count]
         packet = [compact(records[gid]) | {'local_scores': {'dense': dense.get(gid, 0), 'metadata': dict(scored)[gid]}} for gid in candidates]
@@ -201,11 +238,32 @@ class Recommender:
             reasons = [e['label'] for e in evidence] or ['Matched local title metadata.']
             if record.get('num_pages'):
                 reasons = [f"{record['num_pages']} pages"] + reasons[:2]
+            visual_evidence = self.visual_vectors.snapshot[3].get(gid) if gid in visual_dense and self.visual_vectors else None
+            if visual_evidence:
+                try:
+                    archive = self.library.storage_dir / f'{gid}.cbz'
+                    if source_token(archive) == visual_evidence['source_fingerprint']:
+                        stored = json.loads(visual_evidence['evidence_json'])
+                        observations = stored.get('observation', {})
+                        label = next((entry for field in ('style', 'setting', 'activities', 'tone', 'composition')
+                                      for entry in observations.get(field, [])), None)
+                        pages = stored.get('pages', [])
+                        if label and isinstance(pages, list) and all(type(p) is int and p > 0 for p in pages):
+                            evidence.append({'type': 'visual', 'document_key': visual_evidence['document_key'],
+                                             'label': 'Sampled pages show ' + label, 'pages': pages, 'coverage': 'sampled'})
+                            reasons.append('Sampled pages: ' + label)
+                except (OSError, ValueError, TypeError):
+                    pass
             response['results'].append(dict(id=str(gid), title=record['title'], pages=record.get('num_pages'),
                 detail_url=f'/g/{gid}/', cover_url=f'/catalog-thumbnail/{gid}', reasons=reasons, evidence=evidence,
-                match_sources=['metadata'] + (['semantic'] if gid in dense else [])))
+                match_sources=['metadata'] + (['semantic'] if gid in dense else []) + (['visual'] if any(e['type'] == 'visual' for e in evidence) else [])))
         if not response['results']:
             response['assistant_text'] = 'No downloaded galleries match this request.'
+        elif any('visual' in result['match_sources'] for result in response['results']):
+            response['assistant_text'] = 'Recommendations based on metadata and sampled visual observations.'
+        if visual_query and response['coverage']['visual']['searchable'] < len(allowed):
+            missing = [r['id'] for r in response['results'] if 'visual' not in r['match_sources']][:5]
+            response['analysis_suggestions'] = [{'type': 'visual_index', 'gallery_ids': missing}] if missing else []
         stage('ready')
         response['elapsed_seconds'] = round(time.monotonic()-started, 3)
         return response

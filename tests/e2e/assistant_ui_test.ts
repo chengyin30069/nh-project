@@ -24,7 +24,9 @@ Deno.test("dedicated assistant page, async search, resume, mobile, safe cards an
     await page.waitForFunction(() => document.querySelector(".nh-assistant-status")?.textContent?.includes("NIM ok"));
     const box = await page.locator(".nh-assistant-workspace").boundingBox();
     assert(box && box.width > 1000);
-    await page.getByText("Connection & metadata index", { exact: true }).click();
+    await page.getByText("Connection & indexes", { exact: true }).click();
+    assert(await page.getByRole("button", { name: "Index selected IDs" }).isDisabled());
+    assert(await page.getByRole("button", { name: "Index whole library" }).isDisabled());
     await page.getByRole("button", { name: "Check NIM connection", exact: true }).click();
     await page.getByText("NIM accepted the key and the configured embedding model responded.", { exact: true }).waitFor();
     assert((await page.locator(".nh-assistant-diagnostics").textContent())?.includes("loaded by server"));

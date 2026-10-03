@@ -7,6 +7,7 @@ RUN apk add --no-cache \
     procps \
     py3-yaml \
     py3-numpy \
+    py3-pillow \
     python3 \
     wget
 

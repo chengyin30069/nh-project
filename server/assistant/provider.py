@@ -18,6 +18,7 @@ class ProviderError(Exception):
 class ModelProvider(Protocol):
     def chat(self, *, model: str, messages: list[dict[str, object]], max_tokens: int, temperature: float, purpose: str) -> ChatResult: ...
     def embed_texts(self, *, model: str, texts: list[str], input_type: str, purpose: str) -> list[list[float]]: ...
+    def visual_chat(self, *, model: str, messages: list[dict[str, object]], max_tokens: int) -> ChatResult: ...
 
 class FakeModelProvider:
     """Injected replies/errors and call recording; never accesses the network."""
@@ -40,5 +41,13 @@ class FakeModelProvider:
     def embed_texts(self, **kwargs):
         self.calls.append(kwargs)
         return [[(x - 127) / 128 for x in hashlib.sha256(t.encode()).digest()[:8]] for t in kwargs['texts']]
+    def visual_chat(self, **kwargs):
+        self.calls.append({'purpose': 'visual', **kwargs})
+        if self.replies:
+            reply = self.replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return ChatResult(reply if isinstance(reply, str) else json.dumps(reply))
+        return ChatResult(json.dumps({'style': ['black-and-white manga'], 'warnings': ['sampled pages only']}))
     def close(self):
         pass

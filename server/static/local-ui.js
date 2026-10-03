@@ -649,7 +649,7 @@
     const status = node("p", "Checking library…", "nh-assistant-status");
     status.setAttribute("role", "status");
     const admin = node("details", "", "nh-assistant-admin");
-    admin.append(node("summary", "Connection & metadata index"));
+    admin.append(node("summary", "Connection & indexes"));
     const diagnostics = node("div", "", "nh-assistant-diagnostics");
     const checkButton = button("Check NIM connection");
     const checkStatus = node("p", "", "nh-assistant-note");
@@ -657,8 +657,22 @@
     const retryButton = button("Retry failed");
     const adminButtons = node("div", "", "nh-assistant-controls");
     adminButtons.append(checkButton, indexButton, retryButton);
-    admin.append(diagnostics, adminButtons, checkStatus,
-      node("p", "V1 searches metadata. Queries and bounded metadata are sent to NVIDIA when configured. Page images are not uploaded.", "nh-assistant-note"));
+    const visualAdmin = node("section", "", "nh-assistant-visual-admin");
+    visualAdmin.append(node("h3", "Sampled visual index"),
+      node("p", "Selected indexing sends up to six resized pages from each downloaded book to NVIDIA. Ordinary searches use stored summaries and never upload pages.", "nh-assistant-note"));
+    const visualIds = node("input");
+    visualIds.type = "text"; visualIds.placeholder = "Downloaded IDs, separated by commas (max 100)";
+    visualIds.setAttribute("aria-label", "Gallery IDs for visual indexing");
+    const visualStart = button("Index selected IDs");
+    const visualCheck = button("Check visual model with two pages");
+    const visualAll = button("Index whole library");
+    const pilotApprove = button("Approve completed pilot");
+    const visualProgress = node("p", "No visual operation selected.", "nh-assistant-note");
+    const visualControls = node("div", "", "nh-assistant-controls");
+    const visualPause = button("Pause"), visualResume = button("Resume"), visualCancel = button("Cancel");
+    visualControls.append(visualCheck, visualStart, visualAll, pilotApprove, visualPause, visualResume, visualCancel);
+    visualAdmin.append(visualIds, visualControls, visualProgress);
+    admin.append(diagnostics, adminButtons, checkStatus, visualAdmin);
     const output = node("section", "", "nh-assistant-results");
     output.setAttribute("aria-live", "polite");
     output.setAttribute("aria-label", "Conversation and recommendations");
@@ -696,7 +710,18 @@
           `NIM ${data.provider_state} · ${index.indexed || 0} / ${index.total || 0} books indexed${data.scanning ? " · Scanning" : ""}${data.background_enabled === false ? " · Indexing paused" : ""}`;
         diagnostics.replaceChildren(node("p", `Configuration: ${data.config_source || "server configuration"} · enabled: ${Boolean(data.enabled)}`),
           node("p", `${data.api_key_env || "NVIDIA_API_KEY"}: ${data.api_key_configured ? "loaded by server (value hidden)" : "NOT found in server environment"}`));
-        if (index.jobs) diagnostics.append(node("p", `Queued ${(index.jobs.queued || 0) + (index.jobs.retry_wait || 0)} · Failed ${index.jobs.failed || 0}`));
+        if (index.jobs) diagnostics.append(node("p", `Metadata queued ${(index.jobs.queued || 0) + (index.jobs.retry_wait || 0)} · Failed ${index.jobs.failed || 0}`));
+        const visual = data.visual_index || {};
+        diagnostics.append(node("p", `Visual ${visual.indexed || 0} searchable · ${visual.summary_ready || 0} summaries · namespace ${visual.namespace || "none"}`));
+        if (visual.latest_operation_id && saved.operation_id !== visual.latest_operation_id) {
+          saved.operation_id = visual.latest_operation_id;
+          store();
+          void operationStatus();
+        }
+        visualStart.disabled = !available || !visual.enabled || !data.api_key_configured;
+        visualCheck.disabled = visualStart.disabled;
+        visualAll.disabled = !available || !visual.enabled || !visual.pilot_approved;
+        pilotApprove.disabled = !available || !visual.enabled || !saved.operation_id;
         if (data.error) diagnostics.append(node("p", `${data.error.code}: ${data.error.message}`));
         if (!checking) checkStatus.textContent = data.connection_check?.message || "Check NIM connection to verify the key and embedding model.";
         if (!available || !data.api_key_configured) {
@@ -724,11 +749,80 @@
         finally { control.disabled = false; }
       });
     }
+    async function operationStatus() {
+      if (!saved.operation_id || document.hidden) return;
+      try {
+        const op = await request(`/assistant/operations/${saved.operation_id}`);
+        const counts = op.counts || {};
+        const errors = Object.entries(op.errors || {}).map(([code, count]) => `${code} × ${count}`).join(", ");
+        const modelNote = op.requires_model_refresh ? ` Previous visual model is obsolete; resume to retry with ${op.active_model}.` : "";
+        visualProgress.textContent = `Visual ${op.status}: ${counts.searchable || 0} searchable, ${counts.embedding_pending || 0} summaries awaiting embeddings, ${counts.summary_pending || 0} analyzing, ${counts.failed || 0} failed, ${op.discovered || 0} discovered.${errors ? ` Errors: ${errors}.` : ""}${modelNote}`;
+        visualResume.textContent = op.requires_model_refresh ? "Retry with current visual model" : "Resume";
+        pilotApprove.disabled = op.status !== "completed" || op.scope !== "ids" || op.discovered < 20 || op.discovered > 50 || (counts.searchable || 0) < 20;
+      } catch (error) { visualProgress.textContent = error.message; }
+    }
+    visualStart.addEventListener("click", async () => {
+      const ids = visualIds.value.split(/[\s,]+/).filter(Boolean);
+      if (!ids.length || ids.length > 100 || ids.some((id) => !/^[1-9][0-9]{0,17}$/.test(id))) {
+        visualProgress.textContent = "Enter 1–100 numeric gallery IDs."; return;
+      }
+      visualStart.disabled = true;
+      try {
+        const op = await request("/assistant/index/visual", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "ids", gallery_ids: ids }) });
+        saved.operation_id = op.operation_id; store(); await operationStatus();
+      } catch (error) { visualProgress.textContent = error.message; }
+      finally { visualStart.disabled = false; }
+    });
+    visualCheck.addEventListener("click", async () => {
+      const id = visualIds.value.split(/[\s,]+/).find(Boolean);
+      if (!id || !/^[1-9][0-9]{0,17}$/.test(id)) { visualProgress.textContent = "Enter a downloaded gallery ID with at least two readable pages."; return; }
+      visualCheck.disabled = true;
+      visualProgress.textContent = "Sending two sampled pages for compatibility check…";
+      try {
+        const result = await request("/assistant/index/visual/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ gallery_id: id }) });
+        visualProgress.textContent = `Visual model verified with ${result.image_count} ordered images. You can start a selected-ID pilot.`;
+      } catch (error) { visualProgress.textContent = error.message; }
+      finally { visualCheck.disabled = false; }
+    });
+    visualAll.addEventListener("click", async () => {
+      visualAll.disabled = true;
+      try {
+        const op = await request("/assistant/index/visual", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "all" }) });
+        saved.operation_id = op.operation_id; store(); await operationStatus();
+      } catch (error) { visualProgress.textContent = error.message; }
+      finally { await health(); }
+    });
+    pilotApprove.addEventListener("click", async () => {
+      try {
+        await request("/assistant/index/visual/pilot-approve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation_id: saved.operation_id }) });
+        await health(); visualProgress.textContent = "Pilot approved. Whole-library indexing is now available.";
+      } catch (error) { visualProgress.textContent = error.message; }
+    });
+    for (const [control, action] of [[visualPause, "pause"], [visualResume, "resume"], [visualCancel, "cancel"]]) {
+      control.addEventListener("click", async () => {
+        if (!saved.operation_id) return;
+        try { await request(`/assistant/operations/${saved.operation_id}/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); await operationStatus(); }
+        catch (error) { visualProgress.textContent = error.message; }
+      });
+    }
     function renderTurn(message, data) {
       empty.remove();
       const turn = node("article", "", "nh-assistant-turn");
       turn.append(node("p", message, "nh-assistant-user-message"), node("h2", data.assistant_text || "Recommendations"));
       if (data.elapsed_seconds != null) turn.append(node("p", `${data.results?.length || 0} recommendations · ${data.elapsed_seconds.toFixed(1)} seconds`, "nh-assistant-note"));
+      if (data.coverage?.visual) {
+        const coverage = data.coverage.visual;
+        turn.append(node("p", `Sampled visual index: ${coverage.searchable || 0} / ${coverage.eligible || 0} eligible books have stored vectors; source freshness may still need checking.`, "nh-assistant-note"));
+      }
+      const suggested = (data.analysis_suggestions || []).find((item) => item.type === "visual_index" && Array.isArray(item.gallery_ids) && item.gallery_ids.length);
+      if (suggested) {
+        const suggestButton = button("Prepare visual indexing for these books");
+        suggestButton.addEventListener("click", () => {
+          visualIds.value = suggested.gallery_ids.filter((id) => /^[1-9][0-9]{0,17}$/.test(id)).slice(0, 100).join(", ");
+          admin.open = true; visualIds.focus(); admin.scrollIntoView({ block: "start" });
+        });
+        turn.append(suggestButton);
+      }
       if ((data.warnings || []).length || (data.unresolved_terms || []).length) {
         const notes = node("details", "", "nh-assistant-warnings");
         notes.append(node("summary", "Search notes"));
@@ -754,6 +848,13 @@
           saved.previous_plan.excluded_gallery_ids = [...new Set([...(saved.previous_plan.excluded_gallery_ids || []), result.id])].slice(-100);
           store(); exclude.disabled = true; exclude.textContent = "Excluded";
         });
+        for (const evidence of result.evidence || []) {
+          if (evidence.type !== "visual" || !Array.isArray(evidence.pages)) continue;
+          const caption = node("p", `Sampled visual match: ${evidence.label || "visible page details"} (pages ${evidence.pages.join(", ")}; partial sample)`, "nh-assistant-note");
+          details.append(caption);
+          const page = evidence.pages.find((value) => Number.isInteger(value) && value > 0 && value <= (result.pages || 10000));
+          if (page) { const pageLink = node("a", `Open sampled page ${page} →`); pageLink.href = `${BASE_PATH}/g/${result.id}/${page}/`; details.append(pageLink); }
+        }
         details.append(reasons, link, exclude); card.append(coverLink, details); grid.append(card);
       }
       turn.append(grid); output.append(turn);
@@ -814,7 +915,9 @@
     for (const turn of saved.turns || []) renderTurn(turn.message, turn.data);
     health();
     const timer = setInterval(health, 10000);
-    window.addEventListener("pagehide", () => clearInterval(timer), { once: true });
+    const operationTimer = setInterval(operationStatus, 2000);
+    window.addEventListener("pagehide", () => { clearInterval(timer); clearInterval(operationTimer); }, { once: true });
+    operationStatus();
     if (saved.job_id) finishSearch();
   }
 

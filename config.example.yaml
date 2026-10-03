@@ -41,7 +41,7 @@ cache:
   preview_max_bytes: 2147483648
   sweep_interval_seconds: 3600
 
-# V1 sends queries and bounded metadata to NVIDIA; no page images are uploaded.
+# V2 ordinary searches use only stored sampled evidence. Explicit visual indexing sends resized pages to NVIDIA.
 # Export NVIDIA_API_KEY in the server/Compose environment. Never put the key here.
 assistant:
   enabled: false
@@ -51,7 +51,7 @@ assistant:
   parser_model: nvidia/nemotron-3.5-lightning-30b-a3b
   quality_model: nvidia/nemotron-3-super-120b-a12b
   embedding_model: nvidia/nemotron-3-embed-1b
-  visual_model: z-ai/glm-5-3-flash
+  visual_model: z-ai/glm-5.3-flash
   result_limit: 5
   dense_candidate_count: 80
   rerank_candidate_count: 12
@@ -68,3 +68,9 @@ assistant:
   remote_image_analysis_enabled: false
   max_remote_image_edge: 896
   max_remote_image_bytes: 524288
+  visual_index_on_new_gallery: false
+  visual_lazy_index_enabled: false  # reserved; enabling is rejected to keep ordinary search upload-free
+  visual_candidate_count: 80
+  max_remote_images_per_request: 6
+  max_remote_request_bytes: 5242880
+  visual_request_timeout_seconds: 180

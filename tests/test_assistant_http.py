@@ -94,3 +94,21 @@ class HTTPTests(unittest.TestCase):
             time.sleep(.01)
         self.assertEqual(job['status'], 'ready')
         self.assertEqual(job['result']['results'], [])
+
+    def test_visual_operation_routes_and_full_scan_gate(self):
+        import zipfile
+        archive = Path(self.tmp.name) / '1.cbz'
+        with zipfile.ZipFile(archive, 'w') as cbz:
+            cbz.writestr('1.jpg', b'fixture')
+        self.library.database.upsert_gallery(archive, {'id': 1, 'title': {'english': 'Book'},
+                                                       'num_pages': 1, 'tags': []}, complete=True, source='test')
+        assistant = self.library.assistant
+        assistant.config['remote_image_analysis_enabled'] = True
+        status, result = self.request('index/visual', {'scope': 'ids', 'gallery_ids': ['1']})
+        self.assertEqual(status, 202)
+        operation_id = result['operation_id']
+        self.assertEqual(self.request('operations/' + operation_id)[0], 200)
+        self.assertEqual(self.request('operations/' + operation_id + '/pause', {})[1]['status'], 'paused')
+        self.assertEqual(self.request('operations/' + operation_id + '/resume', {})[1]['status'], 'running')
+        self.assertEqual(self.request('index/visual', {'scope': 'all'})[0], 400)
+        self.assertEqual(self.request('index/visual', {'scope': 'ids', 'gallery_ids': ['../1']})[0], 400)

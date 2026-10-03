@@ -9,13 +9,16 @@ services:
     ports:
       - "8765:8765"
       - "8766:8766"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     environment:
       HOME: /home/nh
       PYTHONUNBUFFERED: "1"
       NVIDIA_API_KEY: "${NVIDIA_API_KEY:-}"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - /home/nh:/home/nh/nh
+      - /home/linus/nh:/home/nh/nh
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8765/health"]
       interval: 30s

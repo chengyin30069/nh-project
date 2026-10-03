@@ -1,7 +1,7 @@
-# nh-project Library Assistant — implementation baseline and V2/V3 design
+# nh-project Library Assistant — V1/V2 implementation and V3 design
 
-> Updated: 2026-09-26  
-> Status: V1 implemented; V2/V3 specified but not implemented  
+> Updated: 2026-09-27
+> Status: V1 implemented; V2 pilot running, full-library rollout authorized and pending pilot acceptance; V3 planned
 > Repository: `chengyin30069/nh-project`  
 > Deployment snapshot: 15,376 local metadata embeddings; this is an observation, not a fixed catalog size  
 > Runtime: existing Python server + SQLite + NumPy + NVIDIA hosted NIM; no local GPU  
@@ -24,9 +24,9 @@
 
 ### 0.2 Reading this document
 
-- **Current / V1** describes the current working-tree implementation, primarily `server/assistant/`, `server/library_db.py`, `server/nh_server.py` and the shared UI assets.
-- **Planned / V2 / V3** describes required future work. Proposed settings, routes and tables do not exist merely because they appear here.
-- Current config validation rejects unknown keys. Do not paste the proposed V2/V3 settings into today's config.
+- **Current / V1 / V2** describes the current working-tree implementation, primarily `server/assistant/`, `server/library_db.py`, `server/nh_server.py` and the shared UI assets.
+- **Planned / V3** describes future work. Proposed deep-analysis settings, routes and tables do not exist merely because they appear here.
+- Current config validation rejects unknown keys. V2 visual settings below are accepted; proposed V3 settings are not.
 - Historical provider references are listed in section 43. This revision aligns local implementation and design; it does not newly certify hosted model availability, free quotas or multimodal capabilities.
 
 ### 0.3 Measured progress and limits
@@ -96,7 +96,7 @@ Normal browsing, downloading and reading must remain usable if the assistant is 
 
 V1 uses standard-library HTTP/JSON, PyYAML and NumPy. Docker installs `py3-yaml` and `py3-numpy`. No OpenAI SDK is required.
 
-V2 adds Pillow and `server/assistant/images.py`. Add a focused durable-request coordinator module for V3 if necessary; extend the existing provider and database rather than introducing a second service. Add image/schema/job tests alongside existing tests.
+V2 adds Pillow, `server/assistant/images.py`, `visual.py`, and `visual_indexer.py`. The visual worker is one bounded background thread; it uses the existing NIM scheduler and sidecar jobs. Add a focused durable parent-request coordinator module for V3 if necessary.
 
 ## 3. Configuration and deployment
 
@@ -113,7 +113,7 @@ assistant:
   parser_model: nvidia/nemotron-3.5-lightning-30b-a3b
   quality_model: nvidia/nemotron-3-super-120b-a12b
   embedding_model: nvidia/nemotron-3-embed-1b
-  visual_model: z-ai/glm-5-3-flash
+  visual_model: z-ai/glm-5.3-flash
   result_limit: 5
   dense_candidate_count: 80
   rerank_candidate_count: 12
@@ -129,9 +129,15 @@ assistant:
   remote_image_analysis_enabled: false
   max_remote_image_edge: 896
   max_remote_image_bytes: 524288
+  visual_index_on_new_gallery: false
+  visual_lazy_index_enabled: false
+  visual_candidate_count: 80
+  max_remote_images_per_request: 6
+  max_remote_request_bytes: 5242880
+  visual_request_timeout_seconds: 180
 ```
 
-The visual settings are accepted placeholders in V1; **V1 sends no page images even if the image flag is true**. Setting `visual_model` does not mean a visual index is implemented or that this model has passed an image smoke test.
+The V2 visual settings are implemented. Image upload requires `remote_image_analysis_enabled=true` plus a selected-ID operation or opted-in on-new policy; ordinary search never uploads. `visual_lazy_index_enabled=true` is rejected because that optional policy is deferred. Setting `visual_model` does not mean this model has passed the hosted image smoke test.
 
 Current validation includes typed values, HTTPS API base without URL credentials/query/fragment, result limit <=5, dense count <=1000, rerank count <=100, interactive retries <=3, interactive per-call timeout <=60 s and total budget <=120 s. Recommendation materialization still caps at 400 even if dense count is increased.
 
@@ -149,18 +155,18 @@ Restart alone does not reload Compose environment values. Editors that replace a
 
 Never expose key values or raw provider exception bodies in HTML, JS, API responses or logs. The environment-variable **name**, loaded/not-loaded boolean and selected config filename may be shown for diagnosis.
 
-### 3.3 Planned V2/V3 settings — not accepted by V1
+### 3.3 V2 settings and planned V3 settings
 
-Add validation and examples only when the corresponding phase is implemented. Proposed initial defaults:
+V2 values are validated and shown in `config.example.yaml`. V3 values remain proposals:
 
 | Setting | Initial value | Meaning |
 |---|---:|---|
 | `visual_index_on_new_gallery` | false | opt-in indexing of subsequent downloads |
-| `visual_lazy_index_enabled` | false | optional background policy; never a fast-query dependency |
+| `visual_lazy_index_enabled` | false | reserved; `true` currently fails validation so ordinary searches cannot enqueue uploads |
 | `visual_candidate_count` | 80 | top visual-summary results before bounded fusion |
 | `max_remote_images_per_request` | 6 | must also respect actual selected model capability |
 | `max_remote_request_bytes` | 5242880 | total serialized payload, including base64 |
-| `visual_request_timeout_seconds` | 30 | one VLM attempt, to bound head-of-line blocking |
+| `visual_request_timeout_seconds` | 180 | one VLM attempt; three-gallery live retry exceeded the initial 90-second limit, with interactive fallback still bounded separately |
 | `deep_enabled` | false | explicit deep-analysis feature gate |
 | `max_deep_books` | 4 | initial books per durable request; validated maximum 8 |
 | `max_new_windows_per_book_per_request` | 3 | default additional windows, not whole-book completion |
@@ -168,7 +174,7 @@ Add validation and examples only when the corresponding phase is implemented. Pr
 | `deep_max_active_seconds` | 900 | execution/queue/cooldown budget after parent activation; excludes explicit pause |
 | `deep_request_retention_days` | 7 | terminal parent/request payload retention; independent of reusable documents |
 
-The image flag and feature-specific authorization are both required. Turning a flag on must not automatically submit a full rebuild. Increasing timeouts/concurrency is not the default fix for slow hosted endpoints.
+The image flag and feature-specific authorization are both required. Turning a flag on does not submit a full rebuild. A selected-ID operation with more than six galleries first requires the explicit two-page compatibility check. A full-library operation additionally requires a completed 20–50-gallery pilot with at least 20 searchable summaries and explicit approval in the UI/API. The two-page compatibility check and 20–50-gallery pilot remain pending. A three-gallery selected-ID attempt first failed under the incorrect `z-ai/glm-5-3-flash` model ID. After changing to `z-ai/glm-5.3-flash`, fixing container DNS, selecting low reasoning effort, and raising the visual timeout to 180 seconds, the resumed operation completed with three searchable summaries. This confirms the configured endpoint can process this selected sample; it does not satisfy the formal check or pilot.
 
 ## 4. Provider and scheduling
 
@@ -227,7 +233,7 @@ Current responses include `elapsed_seconds` and `timings` for parse, filters, se
 
 ## 5. Sidecar database and migration boundary
 
-### 5.1 Current tables (`PRAGMA user_version=1`)
+### 5.1 Baseline V1 tables (migrated to `PRAGMA user_version=2`)
 
 Path: `<storage>/.nh-local/assistant.sqlite3`. Connections use short transactions; network and file decoding occur outside them. There are no cross-database foreign keys.
 
@@ -241,7 +247,7 @@ Path: `<storage>/.nh-local/assistant.sqlite3`. Connections use short transaction
 
 **Important correction to the original SQL:** `page_start` and `page_end` are `INTEGER NOT NULL DEFAULT 0`, not nullable. Metadata documents use `(0,0)`. This avoids SQLite's nullable-composite-key duplicate behavior. Future actual page ranges use positive, inclusive, 1-based page numbers; whole-book documents also use `(0,0)` with their own kind.
 
-Current kinds/jobs are operationally metadata-only. Although schema fields are generic, several methods hard-code metadata, version and active embedding model. Current `config_hash` records a hash of the model ID, not all prompt/sampler/config dependencies.
+V2 adds separate `visual_summary` and `embed_visual` jobs, while some V1 metadata methods remain intentionally metadata-specific. Current metadata `config_hash` records a hash of the model ID, not all prompt/sampler/config dependencies.
 
 ### 5.2 Current durability and deletion
 
@@ -262,9 +268,9 @@ Catalog callbacks rebuild only changed documents, remove stale embeddings and de
 
 A missing sidecar is created. Recognized SQLite corruption is quarantined for rebuilding; arbitrary permission/locking errors must be reported, not treated as permission to rename/delete a database. Never quarantine `library.sqlite3` as an assistant recovery action.
 
-### 5.3 Required V2 migration work
+### 5.3 V2 migration implementation
 
-Before adding visual jobs:
+The V1→V2 migration is ordered and transactional; an offline V1 fixture retains its metadata vector. V2 adds `assistant_document_sources`, `assistant_operations`, and `assistant_operation_items`. Visual summary and embedding stages are separate durable jobs. The following remain design invariants and review criteria:
 
 1. Implement ordered transactional migrations. Do not unconditionally reset `user_version=1`; preserve existing V1 documents/vectors and reject unsupported newer schemas safely.
 2. Generalize document upsert, dedupe, claim, retry, completion and status by **job type, kind, source identity and active producer namespace**. Current per-gallery cancellation must not cancel unrelated visual/narrative jobs when metadata changes.
@@ -386,7 +392,7 @@ Resolve metadata terms through existing normalization, transitive explicit alias
 
 ### 8.3 Mode is not upload consent
 
-Current V1 accepts `auto|fast|deep` at the API but executes metadata-only fast behavior; deep/visual/narrative requests receive a limitation warning. V2 `auto` may search stored visual evidence. V3 parsing may suggest deeper analysis, but must not itself enqueue page uploads. An explicit deep-request action and the image-analysis setting are required.
+Current API accepts `auto|fast|deep`. V2 searches stored visual vectors when a visual query or style/scene preference is present, while narrative/deep analysis still receives a limitation warning. Parsing never enqueues page uploads. V3 requires an explicit deep-request action and the image-analysis setting.
 
 ## 9. Current HTTP contracts and planned extensions
 
@@ -394,11 +400,11 @@ All API paths below are relative to `/_nh-local/api/assistant`. Apply the deploy
 
 ### 9.1 Health and diagnostic check
 
-`GET /health` and `GET /index/status` return enabled/available/key-loaded booleans, provider state, sanitized error, connection-check state, config source/environment-variable name, metadata index counts/model/jobs, visual placeholder, scanning and background-enabled flags.
+`GET /health` and `GET /index/status` return enabled/available/key-loaded booleans, provider state, sanitized error, connection-check state, config source/environment-variable name, metadata and active visual index counts/models/jobs, scanning and background-enabled flags.
 
 Key presence is not a validity check. `POST /check` with `{}` sends a short embedding test and returns `missing_key`, `verified` or `failed`, with a sanitized explanation/status. It tests the configured embedding endpoint, not every model. Unlike recommendation submission this diagnostic currently waits for its single interactive call (bounded by the per-call timeout).
 
-An enabled but failed initialization must remain `enabled=true, available=false`; it must not be mislabeled disabled. V1 visual health is always disabled/zero.
+An enabled but failed initialization remains `enabled=true, available=false`; it must not be mislabeled disabled. V2 visual health reports the active namespace and pilot gate.
 
 ### 9.2 Recommendation submission
 
@@ -483,13 +489,15 @@ POST /index/gallery/{id}    {}  -> 202, queued flag
 POST /index/retry-failed    {}  -> 202, queued count for active metadata model
 ```
 
-`POST /index/visual` is **not implemented** and currently rejects the action. No current job-cancel or deep-analysis route exists.
+V2 implements explicit visual indexing, a two-page compatibility check, pilot approval, and durable operation controls. No deep-analysis route exists.
 
-### 9.5 Planned V2/V3 routes
+### 9.5 Current V2 and planned V3 routes
 
 | Route | Version | Contract |
 |---|---|---|
 | `POST /index/visual` | V2 | explicit `{scope: "all"}` or `{scope: "ids", gallery_ids: [...]}`; <=100 IDs; returns durable operation ID, scan progress/counts |
+| `POST /index/visual/check` | V2 | explicit `{gallery_id: "..."}`; uploads two sampled pages and checks ordered JSON from the active visual model |
+| `POST /index/visual/pilot-approve` | V2 | explicit `{operation_id: "..."}`; unlocks full scan after a completed 20–50-gallery pilot with at least 20 searchable summaries and human review |
 | `GET /operations/{id}` | V2 | durable visual scan/job progress; distinguishes summary-ready from searchable/embedded |
 | `POST /operations/{id}/pause`, `/resume`, `/cancel` | V2 | persist intent; do not abort an already-sent HTTP call |
 | `POST /index/retry-failed` | V2 | optional validated kind/namespace; `{}` preserves current metadata behavior; refusals need explicit per-gallery reanalysis |
@@ -497,7 +505,7 @@ POST /index/retry-failed    {}  -> 202, queued count for active metadata model
 | `GET /deep/{request_id}` | V3 | persistent parent status/progress, preliminary/final results, evidence coverage and consumed budget |
 | `POST /deep/{id}/pause`, `/resume`, `/cancel` | V3 | durable parent controls; child reuse/reference rules in section 31 |
 
-Keep `/jobs/{id}` for ephemeral ordinary searches. Do not silently change its TTL/status contract when durable analysis is added. New actions revalidate all client-supplied plans/IDs, even if originally returned by the server. A V2 visual scan operation can use the durable request table introduced earlier than V3; do not invent a second unrelated job store.
+Keep `/jobs/{id}` for ephemeral ordinary searches. Do not silently change its TTL/status contract when durable analysis is added. New actions revalidate all client-supplied plans/IDs, even if originally returned by the server. V2 visual operations use `assistant_operations` and existing durable jobs; V3 can extend that store.
 
 # V1 — Implemented metadata-first assistant
 
@@ -590,7 +598,7 @@ Not established by those checks:
 
 Before choosing a different parser model, compare a fixed multilingual intent/constraint set and measured hosted latency. Keep embedding model unchanged unless an explicit migration/reindex is intended. Smaller parameter count alone does not prove lower shared-endpoint latency.
 
-# V2 — Planned precomputed visual evidence
+# V2 — Implemented precomputed visual evidence (full rollout paused after quality audit)
 
 ## 16. Scope and fast-path boundary
 
@@ -789,19 +797,24 @@ Extend `/AI_assistant`; do not reintroduce an overlay. Connection/index details 
 
 Cards distinguish **Metadata match** from **Sampled visual match**, display analyzed page ranges/count and uncertainty, and open existing reader routes. A visual-style request with low coverage returns promptly with a clear note and an explicit index action.
 
-Release sequence: opt-in 20–50-gallery pilot → verify payloads/refusals/latency/retrieval usefulness → selected-ID indexing → explicitly triggered full scan. Do not infer usefulness from successfully receiving JSON alone.
+Release sequence: opt-in two-page compatibility check → 20–50-gallery pilot → verify payloads/refusals/latency/retrieval usefulness → explicit pilot approval → full scan. On 2026-09-27 the two-page compatibility check passed and a 30-gallery stratified pilot (`bd6482bfdadf4a43a9507fb44f14a274`) completed the basic schema/evidence gate. The user authorized full-library indexing, and rollout operation `b2654ac60b344da9abdeab50ccf4d64e` began. The basic gate did not test retrieval relevance; it must not be treated as proof of production quality.
+
+On 2026-09-28 the full scan was paused after an audit of throughput and sampled output. At the pause, about 634 galleries were searchable and 5,592 had failed; 5,545 failures were `provider_degraded`. The NVIDIA endpoint had entered a degraded/circuit-open period. The worker previously counted a locally rejected request as a gallery attempt, so seven circuit-open claims could permanently fail a gallery without seven HTTP requests. The worker now returns those claims to `retry_wait` without consuming an attempt, applies a worker-wide cooldown on transient errors, and pauses the namespace on HTTP 402 as well as 401/403/404. Automatic indexing of new downloads and remote image analysis are disabled in the deployed configuration; the rollout coordinator is stopped. Existing summaries and embeddings remain available for comparison. Do not resume the full operation solely to increase coverage until relevance and provider throughput are measured again.
+
+Sampled summaries describe some visible cover/page details correctly, but many observations repeat low-discrimination facts such as monochrome interiors, screentones, dialogue, translation text, and universal warnings. The current prompt and sparse 4–6-page sampling deliberately prohibit claims about unobserved story arcs. Therefore these summaries cannot meet a whole-book plot-search goal, even if every gallery completes. Before another bulk pass, create a representative query/gallery relevance set and compare V1 against V2 using retrieval metrics and manual evidence checks. Test concise discriminative observations with page references, contiguous interior windows for story-related retrieval, and at least two visual models on the same sample. Record actual latency, refusals, cost, and search uplift; only then select an indexing scope and provider.
 
 V2 acceptance:
 
-- [ ] versioned DB migration preserves existing metadata index;
-- [ ] safe bounded decode and verified configured VLM payload contract;
-- [ ] no page upload from ordinary search, disabled config, or a parser decision alone;
-- [ ] durable summary and embedding stages resume independently;
-- [ ] active kind/model namespaces and source invalidation work;
-- [ ] low coverage/refusal leaves metadata results usable;
-- [ ] visual-only candidates can enter bounded fusion without violating hard filters;
-- [ ] responsive page, polling, restart/pause/cancel and evidence links are tested;
-- [ ] pilot measures quality and latency before a full build is offered as routine.
+- [x] versioned DB migration preserves existing metadata vectors in an offline V1 fixture;
+- [x] bounded decode and provider payload format have deterministic tests;
+- [x] no page upload from ordinary search, disabled config, or a parser decision alone;
+- [x] durable summary and embedding stages resume independently in offline tests;
+- [x] active kind/model namespaces and source invalidation are implemented;
+- [x] low coverage leaves metadata results usable; refusal is isolated to visual work;
+- [x] visual-only candidates enter bounded fusion without overriding hard filters;
+- [ ] browser controls/evidence need a successful browser run; the local Playwright fixture navigation timed out before the assistant page loaded;
+- [x] configured hosted VLM two-page compatibility and a 30-gallery basic JSON/evidence pilot completed;
+- [ ] measured relevance/latency pilot and V1-versus-V2 search evaluation remain open; full build is paused.
 
 # V3 — Planned explicit, durable narrative analysis
 
@@ -985,7 +998,7 @@ V2/V3 add bounded image decode and a durable coordinator, not one thread per gal
 
 Lease duration must exceed a single attempt and be renewed while queued behind remote work (current metadata leases: 600 s, heartbeat 30 s). Recover only eligible expired leases, protect writes by attempt token plus source/document identity, and make successful document/embedding completion and job transitions atomic.
 
-Generalize job claiming by kind/namespace. The present metadata-only `claim(model)` and per-gallery cancellation logic are not sufficient for visual/narrative jobs. Fairness must include pending interactive work at each **child-call boundary**, while accepting that in-flight HTTP is not preempted.
+V2 job claiming filters by type/model and active operation, and metadata cancellation is scoped to metadata jobs. V3 still needs parent/child dependency rules. Fairness includes pending interactive work at each **child-call boundary**, while in-flight HTTP is not preempted.
 
 ## 35. Failure matrix
 
@@ -1030,7 +1043,7 @@ Repairs and failures may change counts but never bypass the interactive budget. 
 
 ### 37.3 Visual build
 
-A full 15k visual build can require approximately 15k VLM calls plus 469 batched text-embedding calls before retries. At the initial 30-second VLM attempt ceiling, worst-case occupancy is far beyond an interactive task. Use a pilot, explicit admission, durable progress and pause/cancel; do not run it on restart or on an ordinary visual query.
+A full 15k visual build can require approximately 15k VLM calls plus 469 batched text-embedding calls before retries. At the configured 180-second VLM attempt ceiling, worst-case occupancy is far beyond an interactive task. Use a pilot, explicit admission, durable progress and pause/cancel; do not run it on restart or on an ordinary visual query.
 
 ### 37.4 Initial deep request
 
@@ -1059,13 +1072,13 @@ Use `FakeModelProvider`; no key or live endpoint is required in normal CI. Curre
 - `tests/e2e/assistant_ui_test.ts`: dedicated navigation, desktop/mobile width, polling/reload, follow-up exclusions, diagnostics, XSS and reader independence;
 - existing gallery/catalog/presentation suites: regression coverage for shared UI/server assets.
 
-### 38.2 Required V2 tests
+### 38.2 V2 deterministic coverage and remaining checks
 
-Add migration-from-real-V1 fixtures; per-kind claims/cancellation; separate summary/embedding recovery; source replacement/deletion during inference; active namespace selection; coverage states; batch query embeddings and balanced fusion under the 400-record cap.
+`test_assistant_visual.py` covers migration from a V1-shaped sidecar, archive ordering/traversal/corruption, observation limits, disabled uploads, selected-ID staging, restart/pause/resume, shared-operation cancellation, source replacement, cached visual search and one batched query-embedding call. `test_assistant_http.py` covers operation routes and the full-scan gate. `test_nim_client.py` covers ordered image parts and the per-call timeout. Broaden fixture coverage for decompression-bomb archives, source changes during remote inference, and balanced fusion near the 400-record cap before a production full scan.
 
-Image tests must include traversal/encrypted members, corrupt/decompression-bomb images, pixel/member/request caps including base64, one-page books, duplicate sample positions, deterministic natural page order, EXIF stripping and the disabled-upload gate. Mock image payload checks ensure raw bytes never reach logs/job JSON.
+Code enforces traversal/encryption/expansion/pixel/member/request caps, one-page and duplicate-safe sample positions, reader-compatible numeric ordering, EXIF stripping, and the disabled-upload gate. The deterministic suite has direct tests for several of these limits; the untested edge cases above remain explicit verification work. Job JSON and logs contain no page bytes.
 
-UI tests must prove ordinary queries with low coverage still return, do not start VLM work, and render explicit index operations and sampled evidence safely.
+The browser suite was updated for V2 controls, but fixture navigation timed out before it reached the assistant page in this session. A successful browser run and visual-operation interaction test remain open.
 
 ### 38.3 Required V3 tests
 
@@ -1090,19 +1103,19 @@ Current live smoke covers text chat/embedding, not image capabilities or end-to-
 
 Configuration, provider/scheduler, diagnostics, metadata sidecar/indexing, bounded retrieval, dedicated page, async ephemeral requests and regression tests are implemented. Maintain them as the baseline. Remaining measurement work is hosted latency/relevance and cold-cache/I/O behavior, not rebuilding V1 as another service.
 
-### Phase 3A — V2 foundation
+### Phase 3A — V2 foundation implemented
 
 1. Add tested ordered DB migrations and generalized per-kind job/document APIs.
-2. Add provenance, upload gates, bounded image decoding and capability pilot.
+2. Add provenance, upload gates, bounded image decoding and opt-in capability check. The hosted check remains unrun.
 3. Add visual-summary and visual-embedding jobs as separate dependencies.
 4. Add durable visual operations with checkpoints and pause/resume/cancel.
 
-### Phase 3B — V2 retrieval/UI
+### Phase 3B — V2 retrieval/UI implemented; pilot pending
 
 1. Add active visual snapshots, invalidation and batched query embedding.
 2. Add bounded balanced fusion, sampled evidence and coverage counts.
 3. Extend the dedicated page with explicit indexing operations.
-4. Complete pilot/acceptance tests before permitting an explicit full build.
+4. Complete the hosted pilot/acceptance checks before the operator approves an explicit full build. The server enforces this gate.
 
 ### Phase 4A — V3 durability and limits
 
@@ -1118,9 +1131,9 @@ Configuration, provider/scheduler, diagnostics, metadata sidecar/indexing, bound
 3. Add explicit selected-book deep actions, progress, partial results and continuation.
 4. Verify ordinary-search latency under deep load, then run a bounded opt-in pilot.
 
-## 40. Expected future code changes
+## 40. Implemented V2 areas and expected V3 changes
 
-| Area | V2 work | V3 work |
+| Area | V2 implementation | V3 work |
 |---|---|---|
 | settings/config examples | validated visual policy/resource limits | deep gates, budgets, retention |
 | `db.py` | migrations, per-kind operations, provenance, durable operation state | parent dependencies, reservations, retention |
@@ -1165,8 +1178,15 @@ Local implementation is the source for this revision's **current behavior**:
 - [Recommender](server/assistant/recommender.py)
 - [Sidecar database](server/assistant/db.py)
 - [NIM adapter/scheduler](server/assistant/nim_client.py)
+- [Bounded image sampler](server/assistant/images.py)
+- [Durable visual coordinator](server/assistant/visual_indexer.py)
 
-Provider documentation consulted during the earlier NIM/V1 implementation is listed below for later re-verification. This 2026-09-26 documentation update does **not** assert a new availability/terms check:
+The official NVIDIA model card describes `z-ai/glm-5.3-flash` as accepting images with up to eight per request, defaulting to maximum reasoning effort, and recommending `clear_thinking=true` for chat; the endpoint reference lists `POST /v1/chat/completions`. The V2 implementation caps itself at six images. The subsequent full rollout exposed poor throughput and low retrieval specificity, as described in section 23; hosted compatibility and JSON validity alone were insufficient. References:
+
+- [GLM-5.3-Flash model card](https://docs.api.nvidia.com/nim/reference/z-ai-glm-5-3-flash)
+- [GLM-5.3-Flash endpoint](https://docs.api.nvidia.com/nim/re/reference/z-ai-glm-5-3-flash-infer)
+
+Earlier provider references:
 
 - [NVIDIA API quickstart](https://docs.api.nvidia.com/nim/docs/api-quickstart)
 - [NVIDIA LLM API reference](https://docs.api.nvidia.com/nim/re/reference/llm-apis)
@@ -1175,4 +1195,4 @@ Provider documentation consulted during the earlier NIM/V1 implementation is lis
 - [Nemotron 3.5 Lightning catalog page](https://build.nvidia.com/nvidia/nemotron-3.5-lightning-30b-a3b)
 - [NVIDIA hosted model catalog](https://build.nvidia.com/models)
 
-Before V2/V3 implementation, re-check the selected visual model's actual image API and limits with official documentation and an explicit pilot. Do not treat an old model table as proof that free hosted image analysis is still available.
+Before resuming a hosted full visual build, measure refusals, throughput, and retrieval usefulness against a representative query set. A compatibility check and basic evidence pilot do not establish search quality or account quota.

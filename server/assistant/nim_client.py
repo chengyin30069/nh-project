@@ -16,7 +16,9 @@ from .provider import ChatResult, ProviderError
 from .diagnostics import provider_error
 
 LOG = logging.getLogger(__name__)
-PRIORITIES = {'parse': 0, 'query': 1, 'rerank': 2, 'embed_metadata': 10}
+PRIORITIES = {'parse': 0, 'query': 1, 'rerank': 2, 'deep_chunk': 3,
+              'deep_aggregate': 4, 'embed_metadata': 10, 'visual': 20,
+              'embed_visual': 20, 'maintenance': 30}
 
 
 def retry_after(value):
@@ -181,10 +183,11 @@ class NvidiaNimClient:
             try:
                 request = urllib.request.Request(self.config['api_base'].rstrip('/') + endpoint, data=encoded,
                     headers={'Authorization': 'Bearer ' + self._key, 'Content-Type': 'application/json'})
-                remaining = deadline-time.monotonic() if deadline is not None else self.config['request_timeout_seconds']
+                timeout = self.config['visual_request_timeout_seconds'] if purpose == 'visual' else self.config['request_timeout_seconds']
+                remaining = deadline-time.monotonic() if deadline is not None else timeout
                 if remaining <= 0:
                     raise ProviderError('interactive_deadline')
-                with self.opener(request, timeout=max(.01, min(self.config['request_timeout_seconds'], remaining))) as response:
+                with self.opener(request, timeout=max(.01, min(timeout, remaining))) as response:
                     status = response.status
                     data = response.read(8 * 1024 * 1024 + 1)
                     if len(data) > 8 * 1024 * 1024:
@@ -207,8 +210,10 @@ class NvidiaNimClient:
             except (ValueError, KeyError, TypeError):
                 raise ProviderError('invalid_provider_response') from None
             finally:
-                LOG.info('inference time=%s purpose=%s model=%s latency=%.3f status=%s retries=%s input_bytes=%s images=0 usage=%s',
-                         time.time(), purpose, payload['model'], time.monotonic()-started, status, attempt, len(encoded), usage)
+                image_count = sum(part.get('type') == 'image_url' for message in payload.get('messages', [])
+                                  for part in (message.get('content') if isinstance(message.get('content'), list) else []))
+                LOG.info('inference time=%s purpose=%s model=%s latency=%.3f status=%s retries=%s input_bytes=%s images=%s usage=%s',
+                         time.time(), purpose, payload['model'], time.monotonic()-started, status, attempt, len(encoded), image_count, usage)
         try:
             result = self.scheduler.submit(call, purpose, deadline=deadline)
             self.last_error = None
@@ -221,12 +226,35 @@ class NvidiaNimClient:
         payload = dict(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature, stream=False)
         if model.startswith(('nvidia/nemotron-3.5-', 'nvidia/nemotron-3-')):
             payload['chat_template_kwargs'] = {'enable_thinking': False}
+        elif model == 'z-ai/glm-5.3-flash':
+            payload['reasoning_effort'] = 'low'
+            payload['chat_template_kwargs'] = {'clear_thinking': True}
         value = self._request('/chat/completions', payload, purpose)
         try:
             text = value['choices'][0]['message']['content']
             if not isinstance(text, str):
                 raise ValueError()
             return ChatResult(text, value.get('usage', {}))
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise ProviderError('invalid_chat_response') from None
+
+    def visual_chat(self, *, model, messages, max_tokens=800):
+        count = sum(part.get('type') == 'image_url' for message in messages
+                    for part in (message.get('content') if isinstance(message.get('content'), list) else []))
+        if not 1 <= count <= self.config['max_remote_images_per_request']:
+            raise ValueError('invalid visual image count')
+        payload = dict(model=model, messages=messages, max_tokens=max_tokens, temperature=0.1, stream=False)
+        if model == 'z-ai/glm-5.3-flash':
+            payload['reasoning_effort'] = 'low'
+            payload['chat_template_kwargs'] = {'clear_thinking': True}
+        if len(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()) > self.config['max_remote_request_bytes']:
+            raise ProviderError('payload_too_large', status=413)
+        value = self._request('/chat/completions', payload, 'visual')
+        try:
+            result = value['choices'][0]['message']['content']
+            if not isinstance(result, str):
+                raise ValueError()
+            return ChatResult(result, value.get('usage', {}))
         except (KeyError, IndexError, TypeError, ValueError):
             raise ProviderError('invalid_chat_response') from None
 

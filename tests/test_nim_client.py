@@ -68,3 +68,21 @@ class NimTests(unittest.TestCase):
         release.set()
         for thread in threads: thread.join(2)
         self.assertEqual(order, ['initial', 'interactive', 'background'])
+
+    def test_visual_payload_is_bounded_and_ordered(self):
+        captured = []
+        def opener(req, **kwargs):
+            captured.append((req, kwargs))
+            return Response(json.dumps({'choices': [{'message': {'content': '{"style":["ink"]}'}}]}).encode())
+        client = self.client(opener)
+        images = [{'type': 'text', 'text': 'Page 1'}, {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,AA=='}},
+                  {'type': 'text', 'text': 'Page 2'}, {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,BB=='}}]
+        result = client.visual_chat(model='z-ai/glm-5.3-flash', messages=[{'role': 'user', 'content': images}])
+        self.assertIn('ink', result.text)
+        payload = json.loads(captured[0][0].data)
+        self.assertEqual(payload['messages'][0]['content'], images)
+        self.assertEqual(payload['reasoning_effort'], 'low')
+        self.assertEqual(payload['chat_template_kwargs'], {'clear_thinking': True})
+        self.assertLessEqual(captured[0][1]['timeout'], 180)
+        with self.assertRaises(ValueError):
+            client.visual_chat(model='m', messages=[{'role': 'user', 'content': []}])
